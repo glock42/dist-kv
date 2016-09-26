@@ -16,21 +16,14 @@ func (mr *Master) schedule(phase jobPhase) {
 	}
 
 	fmt.Printf("Schedule: %v %v tasks (%d I/Os)\n", ntasks, phase, nios)
-
-	// All ntasks tasks have to be scheduled on workers, and only once all of
-	// them have been completed successfully should the function return.
-	// Remember that workers may fail, and that any given worker may finish
-	// multiple tasks.
-	//
-	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
-	//
-
     for  i:= 0; i < ntasks; i += len(mr.workers) {
 		mr.Mutex.Lock()
         for j, worker := range mr.workers{
             doTaskArgs := DoTaskArgs{mr.jobName, mr.files[i + j], phase, i + j , nios}
             ok := call(worker, "Worker.DoTask", doTaskArgs, new(struct{}))
             if !ok {
+				i--
+                continue
                 fmt.Println("call worker error!")
             }
         }

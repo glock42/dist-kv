@@ -24,5 +24,19 @@ func (mr *Master) schedule(phase jobPhase) {
 	//
 	// TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO TODO
 	//
+
+    for  i:= 0; i < ntasks; i += len(mr.workers) {
+		mr.Mutex.Lock()
+        for j, worker := range mr.workers{
+            doTaskArgs := DoTaskArgs{mr.jobName, mr.files[i + j], phase, i + j , nios}
+            ok := call(worker, "Worker.DoTask", doTaskArgs, new(struct{}))
+            if !ok {
+                fmt.Println("call worker error!")
+            }
+        }
+		mr.Mutex.Unlock()
+    }
+
+
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }

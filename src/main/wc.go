@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"mapreduce"
 	"os"
-	"unicode"
+	"strconv"
 	"strings"
-    "strconv"
+	"unicode"
 )
 
 // The mapping function is called once for each piece of the input.

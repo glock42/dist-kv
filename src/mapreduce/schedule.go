@@ -16,20 +16,34 @@ func (mr *Master) schedule(phase jobPhase) {
 	}
 
 	fmt.Printf("Schedule: %v %v tasks (%d I/Os)\n", ntasks, phase, nios)
-    for  i:= 0; i < ntasks; i += len(mr.workers) {
-		mr.Mutex.Lock()
-        for j, worker := range mr.workers{
-            doTaskArgs := DoTaskArgs{mr.jobName, mr.files[i + j], phase, i + j , nios}
-            ok := call(worker, "Worker.DoTask", doTaskArgs, new(struct{}))
-            if !ok {
-				i--
-                continue
-                fmt.Println("call worker error!")
-            }
-        }
-		mr.Mutex.Unlock()
-    }
 
+	isDoneCorrect := make(chan bool)
+	//	workerNum := len(mr.workers)
+	i := 0
+	for i < ntasks {
+		for worker := range mr.registerChannel {
+			go func(i int, mr *Master, phase jobPhase, nios int) {
+				doTaskArgs := DoTaskArgs{mr.jobName, mr.files[i], phase, i, nios}
+				ok := call(worker, "Worker.DoTask", doTaskArgs, new(struct{}))
+				if !ok {
+					fmt.Println("call worker error!")
+					isDoneCorrect <- false
+					return
+				} else {
+					isDoneCorrect <- true
+					mr.registerChannel <- worker
+				}
+			}(i, mr, phase, nios)
+			i++
+			fmt.Println(worker)
+			if !<-isDoneCorrect {
+				i--
+			}
+			if i >= ntasks {
+				break
+			}
+		}
+	}
 
 	fmt.Printf("Schedule: %v phase done\n", phase)
 }

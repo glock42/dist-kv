@@ -24,6 +24,7 @@ import (
     "time"
     "math/rand"
     //"os"
+    //"fmt"
 )
 
 // import "bytes"
@@ -46,8 +47,8 @@ type Status int
 
 const (
     Follower Status = iota // value --> 0
-    Candidate             // value --> 1
-    Leader                // value --> 2
+    Candidate              // value --> 1
+    Leader                 // value --> 2
 )
 
 //
@@ -66,6 +67,7 @@ type Raft struct {
     votedFor    int
 
     status      Status
+    beLeader    chan bool
 }
 
 // return currentTerm and whether this server
@@ -133,18 +135,44 @@ type RequestVoteReply struct {
     VoteGranted bool
 }
 
+type AppendEntriesArgs struct {
+    Term     int
+    LeaderId int
+}
+
+type AppendEntriesReply struct {
+    Term    int
+    Success bool
+}
+
 //
 // example RequestVote RPC handler.
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     // Your code here (2A, 2B).
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
     if rf.votedFor != -1 || args.Term < rf.currentTerm {
         reply.VoteGranted = false
     } else {
         rf.votedFor = args.CandidateId
+        rf.currentTerm = args.Term
+        rf.status = Follower
         reply.VoteGranted = true
     }
     reply.Term = rf.currentTerm
+}
+
+func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+    reply.Term = rf.currentTerm;
+    if rf.status == Candidate {
+        if args.Term >= rf.currentTerm {
+            rf.status = Follower
+            reply.Success = true
+        } else {
+            reply.Success = false
+        }
+    }
 }
 
 //
@@ -181,6 +209,10 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
     return ok
 }
 
+func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
+    ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+    return ok
+}
 
 //
 // the service using Raft (e.g. a k/v server) wants to start
@@ -202,7 +234,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
     // Your code here (2B).
 
-
     return index, term, isLeader
 }
 
@@ -217,7 +248,7 @@ func (rf *Raft) Kill() {
 }
 
 func getRandomExpireTime() time.Duration {
-    return (time.Duration(rand.Intn(150) + 150)) * time.Microsecond
+    return time.Duration(rand.Int63n(300 - 150) + 150) * time.Millisecond
 }
 
 //
@@ -242,32 +273,53 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
     rf.votedFor = -1
 
     rf.status = Follower
-
+    rf.beLeader = make(chan bool, 100)
     // initialize from state persisted before a crash
     rf.readPersist(persister.ReadRaftState())
 
     go func(rf *Raft) {
 
-        timer := time.NewTimer(getRandomExpireTime())
-        <-timer.C
-        rf.status = Candidate
-        timer.Reset(getRandomExpireTime())
-        // start election
-        rf.currentTerm ++
-        votes := 0
-        for i := range rf.peers {
-            if i != rf.me {
-                requestVoteArgs := RequestVoteArgs{rf.currentTerm, me}
-                result := RequestVoteReply{};
-                ok := rf.sendRequestVote(i, &requestVoteArgs, &result);
-                if ok && result.VoteGranted {
-                    votes++
-                }
+        for {
+            switch rf.status {
+            case Follower:
+                <-time.After(getRandomExpireTime())
+                rf.status = Candidate
+            case Leader:
+            case Candidate:
+                // start election
+                rf.currentTerm ++
+                voteCount := 1
+                rf.votedFor = me
+                go func() {
+                    for i := range rf.peers {
+                        if i != rf.me {
+                            go func(index int) {
+                                rf.mu.Lock()
+                                defer rf.mu.Unlock()
+                                requestVoteArgs := RequestVoteArgs{rf.currentTerm, me}
+                                result := RequestVoteReply{};
+                                ok := rf.sendRequestVote(index, &requestVoteArgs, &result);
+                                if ok && result.VoteGranted {
+                                    voteCount++
+                                    if voteCount > len(rf.peers) / 2 {
+                                        rf.beLeader <- true
+                                    }
+                                }
+                            }(i)
+                        }
+                    }
+                }()
+
+                    select {
+                    case <-time.After(getRandomExpireTime()):
+                        rf.status = Follower
+                    case <-rf.beLeader:
+                        rf.status = Leader
+                        println("a leader")
+                    }
             }
         }
-        if votes > len(rf.peers) / 2 {
-            rf.status = Leader
-        }
+
     }(rf)
 
     return rf

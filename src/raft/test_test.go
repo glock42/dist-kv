@@ -4,7 +4,7 @@ package raft
 // Raft tests.
 //
 // we will use the original test_test.go to test your code for grading.
-// so, while you can modify this code to help you debug, please
+// so, while you can modify this code to help you debug, pleasp
 // test with the original before submitting.
 //
 

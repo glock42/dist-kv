@@ -25,6 +25,9 @@ import (
     "math/rand"
     //"os"
     //"fmt"
+    //"strconv"
+    //"strconv"
+    "strconv"
 )
 
 // import "bytes"
@@ -68,6 +71,7 @@ type Raft struct {
 
     status      Status
     beLeader    chan bool
+    timeReset   chan bool
 }
 
 // return currentTerm and whether this server
@@ -77,8 +81,10 @@ func (rf *Raft) GetState() (int, bool) {
     var term int
     var isleader bool
     // Your code here (2A).
+    rf.mu.Lock()
     term = rf.currentTerm
     isleader = rf.status == Leader
+    rf.mu.Unlock()
 
     return term, isleader
 }
@@ -152,26 +158,32 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     // Your code here (2A, 2B).
     rf.mu.Lock()
     defer rf.mu.Unlock()
+
+    println(strconv.Itoa(args.CandidateId) + " term " + strconv.Itoa(args.Term) + " request " + strconv.Itoa(rf.me) + " term " + strconv.Itoa(rf.currentTerm))
     if rf.votedFor != -1 || args.Term < rf.currentTerm {
         reply.VoteGranted = false
     } else {
-        rf.votedFor = args.CandidateId
         rf.currentTerm = args.Term
+        rf.votedFor = args.CandidateId
         rf.status = Follower
+        rf.timeReset <- true
         reply.VoteGranted = true
     }
     reply.Term = rf.currentTerm
+    //println(strconv.Itoa(args.CandidateId) + " request " + strconv.Itoa(rf.me) + " over")
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
     reply.Term = rf.currentTerm;
-    if rf.status == Candidate {
-        if args.Term >= rf.currentTerm {
-            rf.status = Follower
-            reply.Success = true
-        } else {
-            reply.Success = false
-        }
+    if args.Term >= rf.currentTerm {
+        rf.status = Follower
+        rf.timeReset <- true
+        rf.votedFor = -1
+        reply.Success = true
+    } else {
+        reply.Success = false
     }
 }
 
@@ -273,7 +285,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
     rf.votedFor = -1
 
     rf.status = Follower
-    rf.beLeader = make(chan bool, 100)
+    rf.beLeader = make(chan bool, 1)
+    rf.timeReset = make(chan bool, 1)
+
     // initialize from state persisted before a crash
     rf.readPersist(persister.ReadRaftState())
 
@@ -282,40 +296,66 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
         for {
             switch rf.status {
             case Follower:
-                <-time.After(getRandomExpireTime())
-                rf.status = Candidate
+                println(strconv.Itoa(rf.me) + " start follower")
+                    select {
+                    case <-time.After(getRandomExpireTime()):
+                        rf.mu.Lock()
+                        println(strconv.Itoa(rf.me) + " be Candidate")
+                        rf.status = Candidate
+                        rf.mu.Unlock()
+                    case <-rf.timeReset:
+                    }
+
             case Leader:
+                for i := range rf.peers {
+                    if i != rf.me {
+                        go func(i int) {
+                            appendEntriesArgs := AppendEntriesArgs{rf.currentTerm, rf.me};
+                            result := AppendEntriesReply{}
+                            rf.sendAppendEntries(i, &appendEntriesArgs, &result)
+                        }(i)
+                    }
+                }
+                time.Sleep(time.Duration(50) * time.Millisecond)
+
             case Candidate:
                 // start election
+                rf.mu.Lock()
                 rf.currentTerm ++
                 voteCount := 1
                 rf.votedFor = me
+                rf.mu.Unlock()
                 go func() {
                     for i := range rf.peers {
                         if i != rf.me {
                             go func(index int) {
-                                rf.mu.Lock()
-                                defer rf.mu.Unlock()
                                 requestVoteArgs := RequestVoteArgs{rf.currentTerm, me}
                                 result := RequestVoteReply{};
                                 ok := rf.sendRequestVote(index, &requestVoteArgs, &result);
-                                if ok && result.VoteGranted {
+                                rf.mu.Lock()
+                                if ok && result.VoteGranted && rf.status != Leader {
                                     voteCount++
-                                    if voteCount > len(rf.peers) / 2 {
+                                    if voteCount > len(rf.peers) / 2   {
+                                        println(strconv.Itoa(rf.me) + " get leader ----------")
                                         rf.beLeader <- true
                                     }
                                 }
+                                rf.mu.Unlock()
                             }(i)
                         }
                     }
                 }()
-
                     select {
                     case <-time.After(getRandomExpireTime()):
+                        rf.mu.Lock()
                         rf.status = Follower
+                        rf.votedFor = -1
+                        rf.mu.Unlock()
                     case <-rf.beLeader:
+                        rf.mu.Lock()
                         rf.status = Leader
-                        println("a leader")
+                        rf.mu.Unlock()
+                        println(strconv.Itoa(rf.me) + " be leader ------------")
                     }
             }
         }

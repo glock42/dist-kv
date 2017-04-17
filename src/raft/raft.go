@@ -25,9 +25,6 @@ import (
     "math/rand"
     //"os"
     //"fmt"
-    //"strconv"
-    //"strconv"
-    "strconv"
 )
 
 // import "bytes"
@@ -49,10 +46,12 @@ type ApplyMsg struct {
 type Status int
 
 const (
-    Follower Status = iota // value --> 0
-    Candidate              // value --> 1
-    Leader                 // value --> 2
+    FOLLOWER Status = iota // value --> 0
+    CANDIDATE              // value --> 1
+    LEADER                 // value --> 2
 )
+
+const HEARTBEAT_TIME int = 50
 
 //
 // A Go object implementing a single Raft peer.
@@ -66,6 +65,12 @@ type Raft struct {
                                     // Your data here (2A, 2B, 2C).
                                     // Look at the paper's Figure 2 for a description of what
                                     // state a Raft server must maintain.
+    logs []interface{}
+
+    commitIndex int
+    lastApplied int
+
+
     currentTerm int
     votedFor    int
 
@@ -83,7 +88,7 @@ func (rf *Raft) GetState() (int, bool) {
     // Your code here (2A).
     rf.mu.Lock()
     term = rf.currentTerm
-    isleader = rf.status == Leader
+    isleader = rf.status == LEADER
     rf.mu.Unlock()
 
     return term, isleader
@@ -144,6 +149,9 @@ type RequestVoteReply struct {
 type AppendEntriesArgs struct {
     Term     int
     LeaderId int
+
+    entries []interface{}
+    leaderCommitIndex int
 }
 
 type AppendEntriesReply struct {
@@ -159,13 +167,13 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     rf.mu.Lock()
     defer rf.mu.Unlock()
 
-    println(strconv.Itoa(args.CandidateId) + " term " + strconv.Itoa(args.Term) + " request " + strconv.Itoa(rf.me) + " term " + strconv.Itoa(rf.currentTerm))
+    //println(strconv.Itoa(args.CandidateId) + " term " + strconv.Itoa(args.Term) + " request " + strconv.Itoa(rf.me) + " term " + strconv.Itoa(rf.currentTerm))
     if rf.votedFor != -1 || args.Term < rf.currentTerm {
         reply.VoteGranted = false
     } else {
         rf.currentTerm = args.Term
         rf.votedFor = args.CandidateId
-        rf.status = Follower
+        rf.status = FOLLOWER
         rf.timeReset <- true
         reply.VoteGranted = true
     }
@@ -178,7 +186,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     defer rf.mu.Unlock()
     reply.Term = rf.currentTerm;
     if args.Term >= rf.currentTerm {
-        rf.status = Follower
+        rf.status = FOLLOWER
         rf.timeReset <- true
         rf.votedFor = -1
         reply.Success = true
@@ -245,7 +253,13 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
     isLeader := true
 
     // Your code here (2B).
+    if rf.status == LEADER {
+        //start agreement
+    } else {
+        isLeader = false
+    }
 
+    term = rf.currentTerm
     return index, term, isLeader
 }
 
@@ -263,6 +277,49 @@ func getRandomExpireTime() time.Duration {
     return time.Duration(rand.Int63n(300 - 150) + 150) * time.Millisecond
 }
 
+func election(rf *Raft) {
+    rf.mu.Lock()
+    rf.currentTerm ++
+    rf.votedFor = rf.me
+    rf.mu.Unlock()
+    go func() {
+        broadcastRequestVote(rf)
+    }()
+}
+
+func broadcastRequestVote(rf *Raft) {
+    voteCount := 1
+    for i := range rf.peers {
+        if i != rf.me {
+            go func(index int) {
+                requestVoteArgs := RequestVoteArgs{rf.currentTerm, rf.me}
+                result := RequestVoteReply{};
+                ok := rf.sendRequestVote(index, &requestVoteArgs, &result);
+                rf.mu.Lock()
+                if ok && result.VoteGranted && rf.status != LEADER {
+                    voteCount++
+                    if voteCount > len(rf.peers) / 2 {
+                        //println(strconv.Itoa(rf.me) + " get leader ----------")
+                        rf.beLeader <- true
+                    }
+                }
+                rf.mu.Unlock()
+            }(i)
+        }
+    }
+}
+
+func broadcastAppendEntries(rf *Raft) {
+    for i := range rf.peers {
+        if i != rf.me {
+            go func(i int) {
+                appendEntriesArgs := AppendEntriesArgs{rf.currentTerm, rf.me};
+                result := AppendEntriesReply{}
+                rf.sendAppendEntries(i, &appendEntriesArgs, &result)
+            }(i)
+        }
+    }
+}
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -284,7 +341,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
     rf.currentTerm = 0
     rf.votedFor = -1
 
-    rf.status = Follower
+    rf.status = FOLLOWER
     rf.beLeader = make(chan bool, 1)
     rf.timeReset = make(chan bool, 1)
 
@@ -292,71 +349,38 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
     rf.readPersist(persister.ReadRaftState())
 
     go func(rf *Raft) {
-
         for {
-            switch rf.status {
-            case Follower:
-                println(strconv.Itoa(rf.me) + " start follower")
-                    select {
-                    case <-time.After(getRandomExpireTime()):
-                        rf.mu.Lock()
-                        println(strconv.Itoa(rf.me) + " be Candidate")
-                        rf.status = Candidate
-                        rf.mu.Unlock()
-                    case <-rf.timeReset:
-                    }
-
-            case Leader:
-                for i := range rf.peers {
-                    if i != rf.me {
-                        go func(i int) {
-                            appendEntriesArgs := AppendEntriesArgs{rf.currentTerm, rf.me};
-                            result := AppendEntriesReply{}
-                            rf.sendAppendEntries(i, &appendEntriesArgs, &result)
-                        }(i)
-                    }
+            rf.mu.Lock()
+            status := rf.status
+            rf.mu.Unlock()
+            switch status {
+            case FOLLOWER:
+                //println(strconv.Itoa(rf.me) + " start follower")
+                select {
+                case <-time.After(getRandomExpireTime()):
+                    rf.mu.Lock()
+                    //println(strconv.Itoa(rf.me) + " be Candidate")
+                    rf.status = CANDIDATE
+                    rf.mu.Unlock()
+                case <-rf.timeReset:
                 }
-                time.Sleep(time.Duration(50) * time.Millisecond)
-
-            case Candidate:
-                // start election
-                rf.mu.Lock()
-                rf.currentTerm ++
-                voteCount := 1
-                rf.votedFor = me
-                rf.mu.Unlock()
-                go func() {
-                    for i := range rf.peers {
-                        if i != rf.me {
-                            go func(index int) {
-                                requestVoteArgs := RequestVoteArgs{rf.currentTerm, me}
-                                result := RequestVoteReply{};
-                                ok := rf.sendRequestVote(index, &requestVoteArgs, &result);
-                                rf.mu.Lock()
-                                if ok && result.VoteGranted && rf.status != Leader {
-                                    voteCount++
-                                    if voteCount > len(rf.peers) / 2   {
-                                        println(strconv.Itoa(rf.me) + " get leader ----------")
-                                        rf.beLeader <- true
-                                    }
-                                }
-                                rf.mu.Unlock()
-                            }(i)
-                        }
-                    }
-                }()
-                    select {
-                    case <-time.After(getRandomExpireTime()):
-                        rf.mu.Lock()
-                        rf.status = Follower
-                        rf.votedFor = -1
-                        rf.mu.Unlock()
-                    case <-rf.beLeader:
-                        rf.mu.Lock()
-                        rf.status = Leader
-                        rf.mu.Unlock()
-                        println(strconv.Itoa(rf.me) + " be leader ------------")
-                    }
+            case LEADER:
+                broadcastAppendEntries(rf)
+                time.Sleep(time.Duration(HEARTBEAT_TIME) * time.Millisecond)
+            case CANDIDATE:
+                election(rf)
+                select {
+                case <-time.After(getRandomExpireTime()):
+                    rf.mu.Lock()
+                    rf.status = FOLLOWER
+                    rf.votedFor = -1
+                    rf.mu.Unlock()
+                case <-rf.beLeader:
+                    rf.mu.Lock()
+                    rf.status = LEADER
+                    rf.mu.Unlock()
+                    //println(strconv.Itoa(rf.me) + " be leader ------------")
+                }
             }
         }
 

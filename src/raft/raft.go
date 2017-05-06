@@ -23,8 +23,7 @@ import (
     //"net"
     "time"
     "math/rand"
-    //"os"
-    //"fmt"
+    "strconv"
 )
 
 // import "bytes"
@@ -65,11 +64,13 @@ type Raft struct {
                                     // Your data here (2A, 2B, 2C).
                                     // Look at the paper's Figure 2 for a description of what
                                     // state a Raft server must maintain.
-    logs []interface{}
+    logs        []Entry
 
     commitIndex int
     lastApplied int
 
+    nextIndex   []int
+    matchIndex  []int
 
     currentTerm int
     votedFor    int
@@ -77,6 +78,15 @@ type Raft struct {
     status      Status
     beLeader    chan bool
     timeReset   chan bool
+
+    isStart     bool
+    applyCh chan ApplyMsg
+}
+
+type Entry struct {
+    Index   int
+    Term    int
+    Command interface{}
 }
 
 // return currentTerm and whether this server
@@ -84,14 +94,14 @@ type Raft struct {
 func (rf *Raft) GetState() (int, bool) {
 
     var term int
-    var isleader bool
+    var isLeader bool
     // Your code here (2A).
     rf.mu.Lock()
     term = rf.currentTerm
-    isleader = rf.status == LEADER
+    isLeader = rf.status == LEADER
     rf.mu.Unlock()
 
-    return term, isleader
+    return term, isLeader
 }
 
 //
@@ -147,11 +157,15 @@ type RequestVoteReply struct {
 }
 
 type AppendEntriesArgs struct {
-    Term     int
-    LeaderId int
+    Term              int
+    LeaderId          int
 
-    entries []interface{}
-    leaderCommitIndex int
+    Entries           Entry
+    LeaderCommitIndex int
+
+    PrevLogIndex      int
+    PrevLogTerm       int
+    IsHeartbeat       bool
 }
 
 type AppendEntriesReply struct {
@@ -182,13 +196,32 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+    if args.IsHeartbeat {
+        println(strconv.Itoa(rf.me) + " recive heartbeat")
+    } else {
+        println(strconv.Itoa(rf.me) + " recive append entry")
+    }
     rf.mu.Lock()
     defer rf.mu.Unlock()
     reply.Term = rf.currentTerm;
+    println(args.Term)
     if args.Term >= rf.currentTerm {
         rf.status = FOLLOWER
         rf.timeReset <- true
         rf.votedFor = -1
+        if !args.IsHeartbeat {
+            println(strconv.Itoa(rf.me) + " append log")
+            rf.logs = append(rf.logs, args.Entries)
+            println("log length" + strconv.Itoa(len(rf.logs)))
+        }
+        if rf.commitIndex < args.LeaderCommitIndex && rf.commitIndex < len(rf.logs){
+            entry := rf.logs[rf.commitIndex + 1]
+            applyCh := ApplyMsg{}
+            applyCh.Index = entry.Index
+            applyCh.Command = entry.Command
+            rf.applyCh <- applyCh
+            rf.commitIndex ++
+        }
         reply.Success = true
     } else {
         reply.Success = false
@@ -252,9 +285,15 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
     term := -1
     isLeader := true
 
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
     // Your code here (2B).
     if rf.status == LEADER {
-        //start agreement
+        println(strconv.Itoa(rf.me) + " ------ start")
+        rf.isStart = true
+        entry := Entry{len(rf.logs), rf.currentTerm, command}
+        rf.logs = append(rf.logs, entry)
+        index = entry.Index
     } else {
         isLeader = false
     }
@@ -310,16 +349,61 @@ func broadcastRequestVote(rf *Raft) {
 }
 
 func broadcastAppendEntries(rf *Raft) {
+    println("------ start broadcast append entry ------")
+    voteCount := 1
     for i := range rf.peers {
         if i != rf.me {
             go func(i int) {
-                appendEntriesArgs := AppendEntriesArgs{rf.currentTerm, rf.me};
+                appendEntriesArgs := AppendEntriesArgs{};
+                appendEntriesArgs.Term = rf.currentTerm
+                appendEntriesArgs.LeaderId = rf.me
+                println("logs size " + strconv.Itoa(len(rf.logs)))
+                println("commit index " + strconv.Itoa(rf.commitIndex))
+                appendEntriesArgs.Entries = rf.logs[rf.commitIndex + 1]
+                appendEntriesArgs.LeaderCommitIndex = rf.commitIndex
+                appendEntriesArgs.PrevLogIndex = -1
+                appendEntriesArgs.PrevLogTerm = -1
+                appendEntriesArgs.IsHeartbeat = false
+                result := AppendEntriesReply{}
+                rf.sendAppendEntries(i, &appendEntriesArgs, &result)
+                rf.mu.Lock()
+                if result.Success {
+                    voteCount++
+                    println("voteCount " + strconv.Itoa(voteCount) + " len(rf.peers) " + strconv.Itoa(len(rf.peers)))
+                    if voteCount == len(rf.peers) {
+                        applyCh := ApplyMsg{}
+                        applyCh.Index = appendEntriesArgs.Entries.Index
+                        applyCh.Command = appendEntriesArgs.Entries.Command
+                        rf.applyCh <- applyCh
+                        rf.commitIndex ++
+                        rf.isStart = false
+                    }
+                }
+                rf.mu.Unlock()
+            }(i)
+        }
+    }
+}
+
+func broadcastHeartbeats(rf *Raft) {
+    for i := range rf.peers {
+        if i != rf.me {
+            go func(i int) {
+                appendEntriesArgs := AppendEntriesArgs{};
+                appendEntriesArgs.Term = rf.currentTerm
+                appendEntriesArgs.LeaderId = rf.me
+                appendEntriesArgs.Entries = Entry{}
+                appendEntriesArgs.LeaderCommitIndex = rf.commitIndex
+                appendEntriesArgs.PrevLogIndex = -1
+                appendEntriesArgs.PrevLogTerm = -1
+                appendEntriesArgs.IsHeartbeat = true
                 result := AppendEntriesReply{}
                 rf.sendAppendEntries(i, &appendEntriesArgs, &result)
             }(i)
         }
     }
 }
+
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -345,6 +429,17 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
     rf.beLeader = make(chan bool, 1)
     rf.timeReset = make(chan bool, 1)
 
+    rf.logs = make([]Entry, 1)
+    println("----------------------------------")
+    println(len(rf.logs))
+    rf.commitIndex = 0
+    rf.lastApplied = 0
+    rf.nextIndex = make([]int, 0)
+    rf.matchIndex = make([]int, 0)
+
+    rf.isStart = false
+    rf.applyCh = applyCh
+
     // initialize from state persisted before a crash
     rf.readPersist(persister.ReadRaftState())
 
@@ -355,32 +450,37 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
             rf.mu.Unlock()
             switch status {
             case FOLLOWER:
-                //println(strconv.Itoa(rf.me) + " start follower")
-                select {
-                case <-time.After(getRandomExpireTime()):
-                    rf.mu.Lock()
-                    //println(strconv.Itoa(rf.me) + " be Candidate")
-                    rf.status = CANDIDATE
-                    rf.mu.Unlock()
-                case <-rf.timeReset:
-                }
+                println(strconv.Itoa(rf.me) + " start follower")
+                    select {
+                    case <-time.After(getRandomExpireTime()):
+                        rf.mu.Lock()
+                        println(strconv.Itoa(rf.me) + " be Candidate")
+                        rf.status = CANDIDATE
+                        rf.mu.Unlock()
+                    case <-rf.timeReset:
+                    }
             case LEADER:
-                broadcastAppendEntries(rf)
+                isStart := rf.isStart
+                if isStart {
+                    broadcastAppendEntries(rf)
+                }else {
+                    broadcastHeartbeats(rf)
+                }
                 time.Sleep(time.Duration(HEARTBEAT_TIME) * time.Millisecond)
             case CANDIDATE:
                 election(rf)
-                select {
-                case <-time.After(getRandomExpireTime()):
-                    rf.mu.Lock()
-                    rf.status = FOLLOWER
-                    rf.votedFor = -1
-                    rf.mu.Unlock()
-                case <-rf.beLeader:
-                    rf.mu.Lock()
-                    rf.status = LEADER
-                    rf.mu.Unlock()
-                    //println(strconv.Itoa(rf.me) + " be leader ------------")
-                }
+                    select {
+                    case <-time.After(getRandomExpireTime()):
+                        rf.mu.Lock()
+                        rf.status = FOLLOWER
+                        rf.votedFor = -1
+                        rf.mu.Unlock()
+                    case <-rf.beLeader:
+                        rf.mu.Lock()
+                        rf.status = LEADER
+                        rf.mu.Unlock()
+                        println(strconv.Itoa(rf.me) + " be leader ------------")
+                    }
             }
         }
 

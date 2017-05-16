@@ -522,6 +522,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
                 //} else {
                 //    broadcastHeartbeats(rf)
                 //}
+                
                 time.Sleep(time.Duration(HEARTBEAT_TIME) * time.Millisecond)
             case CANDIDATE:
                 election(rf)

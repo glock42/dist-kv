@@ -114,16 +114,22 @@ func TestFailAgree2B(t *testing.T) {
 
 	// agree despite one disconnected server?
 	cfg.one(102, servers-1)
+	println("--------------------------------------1")
 	cfg.one(103, servers-1)
+	println("--------------------------------------2")
 	time.Sleep(RaftElectionTimeout)
+	println("start -----------------------------3")
 	cfg.one(104, servers-1)
+	println("--------------------------------------3")
 	cfg.one(105, servers-1)
+	println("--------------------------------------4")
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
 
 	// agree with full set of servers?
 	cfg.one(106, servers)
+	println("--------------------------------------2222222222222222222222222222222222222")
 	time.Sleep(RaftElectionTimeout)
 	cfg.one(107, servers)
 

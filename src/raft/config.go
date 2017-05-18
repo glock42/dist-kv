@@ -275,7 +275,6 @@ func (cfg *config) checkOneLeader() int {
 				}
 			}
 		}
-
 		lastTermWithLeader := -1
 		for t, leaders := range leaders {
 			if len(leaders) > 1 {

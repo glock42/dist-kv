@@ -114,22 +114,16 @@ func TestFailAgree2B(t *testing.T) {
 
 	// agree despite one disconnected server?
 	cfg.one(102, servers-1)
-	println("--------------------------------------1")
 	cfg.one(103, servers-1)
-	println("--------------------------------------2")
 	time.Sleep(RaftElectionTimeout)
-	println("start -----------------------------3")
 	cfg.one(104, servers-1)
-	println("--------------------------------------3")
 	cfg.one(105, servers-1)
-	println("--------------------------------------4")
 
 	// re-connect
 	cfg.connect((leader + 1) % servers)
 
 	// agree with full set of servers?
 	cfg.one(106, servers)
-	println("--------------------------------------2222222222222222222222222222222222222")
 	time.Sleep(RaftElectionTimeout)
 	cfg.one(107, servers)
 
@@ -144,7 +138,6 @@ func TestFailNoAgree2B(t *testing.T) {
 	fmt.Printf("Test (2B): no agreement if too many followers disconnect ...\n")
 
 	cfg.one(10, servers)
-
 	// 3 of 5 followers disconnect
 	leader := cfg.checkOneLeader()
 	cfg.disconnect((leader + 1) % servers)
@@ -182,6 +175,7 @@ func TestFailNoAgree2B(t *testing.T) {
 	if index2 < 2 || index2 > 3 {
 		t.Fatalf("unexpected index %v", index2)
 	}
+	fmt.Printf("----------------------------- index %d------------------------------------------------------------\n", index2)
 
 	cfg.one(1000, servers)
 

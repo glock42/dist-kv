@@ -96,10 +96,10 @@ func (rf *Raft) GetState() (int, bool) {
     var term int
     var isLeader bool
     // Your code here (2A).
-    rf.mu.Lock()
+    rf.lock()
     term = rf.currentTerm
     isLeader = rf.status == LEADER
-    rf.mu.Unlock()
+    rf.unLock()
 
     return term, isLeader
 }
@@ -169,9 +169,9 @@ type AppendEntriesArgs struct {
 }
 
 type AppendEntriesReply struct {
-    Term      int
-    Success   bool
-    NextIndex int
+    Term         int
+    Success      bool
+    TermNotRight bool
 }
 
 //
@@ -179,8 +179,7 @@ type AppendEntriesReply struct {
 //
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     // Your code here (2A, 2B).
-    rf.mu.Lock()
-    defer rf.mu.Unlock()
+    rf.lock()
 
     //println(strconv.Itoa(args.CandidateId) + " term " + strconv.Itoa(args.Term) + " request " + strconv.Itoa(rf.me) + " term " + strconv.Itoa(rf.currentTerm))
     if rf.votedFor != -1 || args.Term < rf.currentTerm {
@@ -193,20 +192,22 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
         reply.VoteGranted = true
     }
     reply.Term = rf.currentTerm
+
     //println(strconv.Itoa(args.CandidateId) + " request " + strconv.Itoa(rf.me) + " over")
+    rf.unLock()
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
+    rf.lock()
+    defer rf.unLock()
     if args.IsHeartbeat {
-        println(strconv.Itoa(rf.me) + " recive heartbeat")
+        //println(strconv.Itoa(rf.me) + " recive heartbeat")
     } else {
-        println(strconv.Itoa(rf.me) + " recive append entry")
+        //println(strconv.Itoa(rf.me) + " recive append entry")
     }
-    rf.mu.Lock()
-    defer rf.mu.Unlock()
     reply.Term = rf.currentTerm;
-    println("rf.currentTerm" + strconv.Itoa(rf.currentTerm))
-    println("args.Term" + strconv.Itoa(args.Term))
+    //println("rf.currentTerm" + strconv.Itoa(rf.currentTerm))
+    //println("args.Term" + strconv.Itoa(args.Term))
     if args.Term >= rf.currentTerm {
         rf.status = FOLLOWER
         rf.timeReset <- true
@@ -224,7 +225,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
             for i := 0; i < len(rf.logs); i++ {
                 entry := rf.logs[i]
                 if entry.Index == args.PrevLogIndex && entry.Term == args.PrevLogTerm {
-                    println(strconv.Itoa(rf.me) + " " + strconv.Itoa(args.PrevLogTerm) + " prevLogTerm " + strconv.Itoa(args.PrevLogIndex) + " args.PrevLogIndex")
+                    //println(strconv.Itoa(rf.me) + " " + strconv.Itoa(args.PrevLogTerm) + " prevLogTerm " + strconv.Itoa(args.PrevLogIndex) + " args.PrevLogIndex")
                     rf.logs = append(rf.logs, args.Entries)
                     println(strconv.Itoa(rf.me) + " append " + strconv.Itoa(args.Entries.Index) + " " + strconv.Itoa(args.Entries.Term) + " " + strconv.Itoa(args.Entries.Command.(int)))
                     isFound = true
@@ -232,18 +233,20 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
                 }
             }
             if !isFound {
-                println("-----------------" + strconv.Itoa(rf.me) + "not found------------------")
+                //println("-----------------" + strconv.Itoa(rf.me) + "not found------------------")
                 reply.Success = false
                 return
             }
-            println("log length " + strconv.Itoa(len(rf.logs)))
+            //println("log length " + strconv.Itoa(len(rf.logs)))
         }
 
         reply.Success = true
     } else {
         rf.currentTerm = args.Term
+        rf.status = FOLLOWER
         reply.Success = false
-        reply.NextIndex = (rf.logs[len(rf.logs) - 1].Index) + 1
+        //reply.NextIndex = (rf.logs[len(rf.logs) - 1].Index) + 1
+        reply.TermNotRight = true
     }
 }
 
@@ -312,11 +315,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
     term := -1
     isLeader := true
 
-    rf.mu.Lock()
-    defer rf.mu.Unlock()
+    rf.lock()
     // Your code here (2B).
     if rf.status == LEADER {
-        println(strconv.Itoa(rf.me) + " ------ start")
+        //println(strconv.Itoa(rf.me) + " ------ start")
         rf.isStart = true
         entry := Entry{len(rf.logs), rf.currentTerm, command}
         rf.logs = append(rf.logs, entry)
@@ -326,6 +328,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
     }
 
     term = rf.currentTerm
+    rf.unLock()
     return index, term, isLeader
 }
 
@@ -344,10 +347,10 @@ func getRandomExpireTime() time.Duration {
 }
 
 func election(rf *Raft) {
-    rf.mu.Lock()
+    rf.lock()
     rf.currentTerm ++
     rf.votedFor = rf.me
-    rf.mu.Unlock()
+    rf.unLock()
     go func() {
         broadcastRequestVote(rf)
     }()
@@ -358,10 +361,12 @@ func broadcastRequestVote(rf *Raft) {
     for i := range rf.peers {
         if i != rf.me {
             go func(index int) {
+                rf.lock()
                 requestVoteArgs := RequestVoteArgs{rf.currentTerm, rf.me}
                 result := RequestVoteReply{};
+                rf.unLock()
                 ok := rf.sendRequestVote(index, &requestVoteArgs, &result);
-                rf.mu.Lock()
+                rf.lock()
                 if ok && result.VoteGranted && rf.status != LEADER {
                     voteCount++
                     if voteCount > len(rf.peers) / 2 {
@@ -369,24 +374,25 @@ func broadcastRequestVote(rf *Raft) {
                         rf.beLeader <- true
                     }
                 }
-                rf.mu.Unlock()
+                rf.unLock()
             }(i)
         }
     }
 }
 
 func broadcastAppendEntries(rf *Raft) {
-    println("------ start broadcast append entry ------")
+    //println("------ start broadcast append entry ------")
     voteCount := 1
     for i := range rf.peers {
         if i != rf.me {
             go func(i int) {
+                rf.lock()
                 appendEntriesArgs := AppendEntriesArgs{};
                 appendEntriesArgs.Term = rf.currentTerm
                 appendEntriesArgs.LeaderId = rf.me
-                println("logs size " + strconv.Itoa(len(rf.logs)))
-                println("commit index " + strconv.Itoa(rf.commitIndex))
-                if rf.commitIndex <= rf.logs[len(rf.logs) - 1].Index && rf.nextIndex[i] < len(rf.logs){
+                //println("logs size " + strconv.Itoa(len(rf.logs)))
+                //println("commit index " + strconv.Itoa(rf.commitIndex))
+                if rf.commitIndex <= rf.logs[len(rf.logs) - 1].Index && rf.nextIndex[i] < len(rf.logs) {
                     appendEntriesArgs.Entries = rf.logs[rf.nextIndex[i]]
                     appendEntriesArgs.LeaderCommitIndex = rf.commitIndex
                     appendEntriesArgs.PrevLogIndex = rf.logs[rf.nextIndex[i] - 1].Index
@@ -400,62 +406,53 @@ func broadcastAppendEntries(rf *Raft) {
                     appendEntriesArgs.IsHeartbeat = true
                 }
                 result := AppendEntriesReply{}
+                result.TermNotRight = false
+                rf.unLock()
                 ok := rf.sendAppendEntries(i, &appendEntriesArgs, &result)
-                rf.mu.Lock()
+                if !ok {
+                    return
+                }
+                if appendEntriesArgs.IsHeartbeat {
+                    rf.lock()
+                    voteCount++
+                    rf.unLock()
+                    return
+                }
                 if result.Success {
-                    if !appendEntriesArgs.IsHeartbeat {
-                        voteCount++
-                        rf.nextIndex[i]++
-                        println("voteCount " + strconv.Itoa(voteCount) + " len(rf.peers) " + strconv.Itoa(len(rf.peers)))
-                        if voteCount > len(rf.peers) / 2 && rf.isStart {
-                            //rf.applyCommand(appendEntriesArgs.Entries)
-                            rf.commitIndex ++
-                            println("commitIndex " + strconv.Itoa(rf.commitIndex))
+                    rf.lock()
+                    voteCount++
+                    rf.nextIndex[i]++
+                    rf.matchIndex[i]++
+                    println("voteCount " + strconv.Itoa(voteCount) + " len(rf.peers) " + strconv.Itoa(len(rf.peers)))
+                    println(rf.isStart)
+                    if voteCount > len(rf.peers) / 2 && rf.isStart {
+                        //rf.applyCommand(appendEntriesArgs.Entries)
+                        rf.commitIndex ++
+                        println("commitIndex " + strconv.Itoa(rf.commitIndex))
+                        if rf.commitIndex == len(rf.logs) - 1 {
                             rf.isStart = false
                         }
                     }
-                } else if ok && !result.Success && !appendEntriesArgs.IsHeartbeat{
-                    for !result.Success && ok {
-                        if result.NextIndex != 0 {
-                            rf.nextIndex[i] = result.NextIndex
-                        } else {
-                            rf.nextIndex[i]--
-                        }
-                        appendEntriesArgs.Entries = rf.logs[rf.nextIndex[i]]
-                        appendEntriesArgs.PrevLogIndex = rf.logs[rf.nextIndex[i] - 1].Index
-                        appendEntriesArgs.PrevLogTerm = rf.logs[rf.nextIndex[i] - 1].Term
-                        println("*****************************" + strconv.Itoa(i) + " retry")
-                        ok = rf.sendAppendEntries(i, &appendEntriesArgs, &result)
+                    rf.unLock()
+                } else {
+                    rf.lock()
+                    if !result.TermNotRight {
+                        rf.nextIndex[i]--
                     }
-                    if result.Success && ok {
-                        rf.nextIndex[i]++
-                    }
+                    rf.unLock()
                 }
-                rf.mu.Unlock()
             }(i)
         }
     }
 }
 
-func broadcastHeartbeats(rf *Raft) {
-    for i := range rf.peers {
-        if i != rf.me {
-            go func(i int) {
-                appendEntriesArgs := AppendEntriesArgs{};
-                appendEntriesArgs.Term = rf.currentTerm
-                appendEntriesArgs.LeaderId = rf.me
-                appendEntriesArgs.Entries = Entry{}
-                appendEntriesArgs.LeaderCommitIndex = rf.commitIndex
-                appendEntriesArgs.PrevLogIndex = -1
-                appendEntriesArgs.PrevLogTerm = -1
-                appendEntriesArgs.IsHeartbeat = true
-                result := AppendEntriesReply{}
-                rf.sendAppendEntries(i, &appendEntriesArgs, &result)
-            }(i)
-        }
-    }
+func (rf *Raft) lock() {
+    rf.mu.Lock()
 }
 
+func (rf *Raft) unLock() {
+    rf.mu.Unlock()
+}
 //
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -482,8 +479,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
     rf.timeReset = make(chan bool, 1)
 
     rf.logs = make([]Entry, 1)
-    println("----------------------------------")
-    println(len(rf.logs))
     rf.commitIndex = 0
     rf.lastApplied = 0
     //rf.nextIndex = make([]int, 0)
@@ -497,50 +492,52 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
     go func(rf *Raft) {
         for {
-            rf.mu.Lock()
+            rf.lock()
             status := rf.status
-            println(strconv.Itoa(rf.me) + " rf.commitIndex " + strconv.Itoa(rf.commitIndex) + " rf.lastApplied " + strconv.Itoa(rf.lastApplied))
+            //println(strconv.Itoa(rf.me) + " rf.commitIndex " + strconv.Itoa(rf.commitIndex) + " rf.lastApplied " + strconv.Itoa(rf.lastApplied))
             if rf.lastApplied < rf.commitIndex && rf.lastApplied + 1 < len(rf.logs) {
                 rf.applyCommand(rf.logs[rf.lastApplied + 1])
             }
-            rf.mu.Unlock()
+            rf.unLock()
             switch status {
             case FOLLOWER:
-                println(strconv.Itoa(rf.me) + " start follower")
+                //println(strconv.Itoa(rf.me) + " start follower")
                     select {
                     case <-time.After(getRandomExpireTime()):
-                        rf.mu.Lock()
-                        println(strconv.Itoa(rf.me) + " be Candidate")
+                        rf.lock()
+                    //println(strconv.Itoa(rf.me) + " be Candidate")
                         rf.status = CANDIDATE
-                        rf.mu.Unlock()
+                        rf.unLock()
                     case <-rf.timeReset:
                     }
             case LEADER:
-                //isStart := rf.isStart
-                //if isStart {
                 broadcastAppendEntries(rf)
-                //} else {
-                //    broadcastHeartbeats(rf)
-                //}
-                
                 time.Sleep(time.Duration(HEARTBEAT_TIME) * time.Millisecond)
             case CANDIDATE:
                 election(rf)
                     select {
                     case <-time.After(getRandomExpireTime()):
-                        rf.mu.Lock()
+                        rf.lock()
                         rf.status = FOLLOWER
                         rf.votedFor = -1
-                        rf.mu.Unlock()
+                        rf.unLock()
+                    case <-rf.timeReset:
+                        rf.lock()
+                        rf.status = FOLLOWER
+                        rf.votedFor = -1
+                        rf.unLock()
                     case <-rf.beLeader:
-                        rf.mu.Lock()
+                        rf.lock()
                         rf.status = LEADER
                         rf.nextIndex = make([]int, len(rf.peers))
                         for i := 0; i < len(rf.peers); i++ {
-                            rf.nextIndex[i] =  rf.logs[len(rf.logs) - 1].Index + 1
+                            rf.nextIndex[i] = rf.logs[len(rf.logs) - 1].Index + 1
                         }
                         rf.matchIndex = make([]int, len(rf.peers))
-                        rf.mu.Unlock()
+                        for i := 0; i < len(rf.peers); i++ {
+                            rf.matchIndex[i] = 0
+                        }
+                        rf.unLock()
                         println(strconv.Itoa(rf.me) + " be leader ------------")
                     }
             }

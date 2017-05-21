@@ -175,7 +175,6 @@ func TestFailNoAgree2B(t *testing.T) {
 	if index2 < 2 || index2 > 3 {
 		t.Fatalf("unexpected index %v", index2)
 	}
-	fmt.Printf("----------------------------- index %d------------------------------------------------------------\n", index2)
 
 	cfg.one(1000, servers)
 

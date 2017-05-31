@@ -23,6 +23,10 @@ import (
     //"net"
     "time"
     "math/rand"
+    "strconv"
+    "fmt"
+    "bytes"
+    "encoding/gob"
 )
 
 // import "bytes"
@@ -50,6 +54,7 @@ const (
 )
 
 const HEARTBEAT_TIME int = 50
+const SNAPSHOT_LOG_SIZE int = 3
 
 //
 // A Go object implementing a single Raft peer.
@@ -120,6 +125,13 @@ func (rf *Raft) persist() {
     // e.Encode(rf.yyy)
     // data := w.Bytes()
     // rf.persister.SaveRaftState(data)
+    w := new(bytes.Buffer)
+    e := gob.NewEncoder(w)
+    e.Encode(rf.currentTerm)
+    e.Encode(rf.votedFor)
+    e.Encode(rf.logs)
+    data := w.Bytes()
+    rf.persister.SaveRaftState(data)
 }
 
 //
@@ -136,6 +148,22 @@ func (rf *Raft) readPersist(data []byte) {
         // bootstrap without any state?
         return
     }
+    r := bytes.NewBuffer(data)
+    d := gob.NewDecoder(r)
+    d.Decode(&rf.currentTerm)
+    d.Decode(&rf.votedFor)
+    d.Decode(&rf.logs)
+}
+
+func (rf *Raft) installSnapshot() {
+    w := new(bytes.Buffer)
+    e := gob.NewEncoder(w)
+    lastAppliedEntry := rf.logs[rf.lastApplied];
+    e.Encode(lastAppliedEntry.Index)
+    e.Encode(lastAppliedEntry.Term)
+    rf.logs = append(rf.logs[0], rf.logs[rf.lastApplied + 1:])   // index problem?? does lastApplied need reduce?
+    data := w.Bytes()
+    rf.persister.SaveSnapshot(data)
 }
 
 //
@@ -179,6 +207,17 @@ type AppendEntriesReply struct {
     TermNotRight bool
 }
 
+type InstallSnapshot struct {
+    Term              int
+    LeaderId          int
+
+    LastIncludedIndex int
+    LastIncludedTerm  int
+
+    Offset            int
+    Data              []byte
+    Done              bool
+}
 //
 // example RequestVote RPC handler.
 //
@@ -186,6 +225,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     // Your code here (2A, 2B).
     rf.lock()
     defer rf.unLock()
+    rf.persist()
     //println(strconv.Itoa(args.CandidateId) + " term " + strconv.Itoa(args.Term) + " request " + strconv.Itoa(rf.me) + " term " + strconv.Itoa(rf.currentTerm))
     if rf.votedFor != -1 || args.Term < rf.currentTerm {
         reply.VoteGranted = false
@@ -211,6 +251,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
     rf.lock()
     defer rf.unLock()
+    rf.persist()
     if args.IsHeartbeat {
         //println(strconv.Itoa(rf.me) + " recive heartbeat")
     } else {
@@ -382,6 +423,7 @@ func broadcastRequestVote(rf *Raft) {
                 ok := rf.sendRequestVote(index, &requestVoteArgs, &result);
                 rf.lock()
                 defer rf.unLock()
+                fmt.Printf("%d send request to %d\n", rf.me, index)
                 if ok && result.Term > rf.currentTerm {
                     rf.currentTerm = result.Term
                     rf.votedFor = -1
@@ -391,7 +433,7 @@ func broadcastRequestVote(rf *Raft) {
                 if ok && result.VoteGranted && rf.status != LEADER {
                     voteCount++
                     if voteCount > len(rf.peers) / 2 {
-                        //println(strconv.Itoa(rf.me) + " get leader ----------")
+                        println(strconv.Itoa(rf.me) + " get leader ----------")
                         rf.beLeader <- true
                     }
                 }
@@ -419,7 +461,7 @@ func broadcastAppendEntries(rf *Raft) {
                 //fmt.Printf("last log's Index %d, nextIndex[%d] %d\n", rf.logs[len(rf.logs) - 1].Index, i, rf.nextIndex[i])
                 nextIndex := rf.nextIndex[i]
                 prevEntry := rf.logs[nextIndex - 1]
-                if rf.logs[len(rf.logs) - 1 ].Index >= nextIndex {
+                if rf.getLastEntry().Index >= nextIndex {
                     appendEntriesArgs.Entries = rf.logs[nextIndex]
                     appendEntriesArgs.LeaderCommitIndex = rf.commitIndex
                     appendEntriesArgs.PrevLogIndex = prevEntry.Index
@@ -446,7 +488,7 @@ func broadcastAppendEntries(rf *Raft) {
                 defer rf.unLock()
                 if result.Term > rf.currentTerm {
                     rf.currentTerm = result.Term
-                    //fmt.Printf("---------------------------------------------------------------------- leader %d become follower\n", rf.me)
+                    fmt.Printf("---------------------------------------------------------------------- leader %d become follower\n", rf.me)
                     rf.status = FOLLOWER
                     rf.votedFor = -1
                     return
@@ -534,11 +576,11 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
             rf.unLock()
             switch status {
             case FOLLOWER:
-                //println(strconv.Itoa(rf.me) + " start follower")
+                println(strconv.Itoa(rf.me) + " start follower")
                     select {
                     case <-time.After(getRandomExpireTime()):
                         rf.lock()
-                    //println(strconv.Itoa(rf.me) + " be Candidate")
+                        println(strconv.Itoa(rf.me) + " be Candidate")
                         rf.votedFor = -1
                         rf.status = CANDIDATE
                         rf.unLock()
@@ -557,6 +599,10 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
                             break
                         }
                     }
+                }
+
+                if len(rf.logs) == SNAPSHOT_LOG_SIZE {
+                    rf.installSnapshot()
                 }
                 rf.unLock()
                 broadcastAppendEntries(rf)
@@ -586,7 +632,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
                             rf.matchIndex[i] = 0
                         }
                         rf.unLock()
-                    //println(strconv.Itoa(rf.me) + " be leader ------------")
+                        println(strconv.Itoa(rf.me) + " be leader ------------")
                     }
             }
         }

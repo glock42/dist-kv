@@ -9,7 +9,10 @@ package raft
 // test with the original before submitting.
 //
 
-import "sync"
+import (
+    "sync"
+    "strconv"
+)
 
 type Persister struct {
 	mu        sync.Mutex
@@ -25,6 +28,7 @@ func (ps *Persister) Copy() *Persister {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	np := MakePersister()
+    println("copy ----------------------" + strconv.Itoa(len(ps.snapshot)))
 	np.raftstate = ps.raftstate
 	np.snapshot = ps.snapshot
 	return np
@@ -52,6 +56,7 @@ func (ps *Persister) SaveSnapshot(snapshot []byte) {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	ps.snapshot = snapshot
+    //println("install snapshot ----------------------" + strconv.Itoa(len(ps.snapshot)))
 }
 
 func (ps *Persister) ReadSnapshot() []byte {

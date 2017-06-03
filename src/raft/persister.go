@@ -11,7 +11,6 @@ package raft
 
 import (
     "sync"
-    "strconv"
 )
 
 type Persister struct {
@@ -28,7 +27,6 @@ func (ps *Persister) Copy() *Persister {
 	ps.mu.Lock()
 	defer ps.mu.Unlock()
 	np := MakePersister()
-    println("copy ----------------------" + strconv.Itoa(len(ps.snapshot)))
 	np.raftstate = ps.raftstate
 	np.snapshot = ps.snapshot
 	return np

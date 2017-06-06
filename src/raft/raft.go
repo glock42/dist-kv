@@ -233,6 +233,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     if args.Term > rf.currentTerm {
         rf.currentTerm = args.Term
         rf.status = FOLLOWER
+        rf.votedFor = -1
     }
 
     reply.Term = rf.currentTerm
@@ -258,7 +259,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
     rf.lock()
-    defer println(strconv.Itoa(rf.me) + " finish appendEntries rpc")
     defer rf.unLock()
     defer rf.persist()
     if args.IsHeartbeat {
@@ -277,9 +277,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     }
 
     if rf.status == FOLLOWER {
-        println("timeRest")
         rf.timeReset <- true
-        println("timeRest over")
     } else if rf.status == CANDIDATE {
         rf.timeReset <- true
         rf.status = FOLLOWER
@@ -310,8 +308,6 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         }
         return
     }
-
-
 
     if !args.IsHeartbeat {
         rf.logs = rf.logs[: args.PrevLogIndex + 1]
@@ -417,16 +413,10 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
         return ok
     }
     if reply.Success {
-        rf.nextIndex[server]++
+        rf.nextIndex[server] = rf.getLastEntry().Index + 1
         rf.matchIndex[server] = rf.nextIndex[server] - 1
     } else {
-        //println("retry")
-        //fmt.Printf("--------------- nextIndex %d ---------\n", reply.NextIndex)
-        //if reply.NextIndex != 0 {
         rf.nextIndex[server] = reply.NextIndex
-        //} else {
-        //    rf.nextIndex[server] --
-        //}
     }
     return ok
 }
@@ -520,6 +510,7 @@ func broadcastAppendEntries(rf *Raft) {
             }
             if count > len(rf.matchIndex) / 2 {
                 rf.commitIndex = N
+                break
             }
         }
         //fmt.Printf("\n")
@@ -543,20 +534,18 @@ func broadcastAppendEntries(rf *Raft) {
             if rf.getLastEntry().Index >= nextIndex {
                 appendEntriesArgs.Entries = make([]Entry, len(rf.logs[nextIndex:]))
                 copy(appendEntriesArgs.Entries, rf.logs[nextIndex:])
-
                 //appendEntriesArgs.Entries = rf.logs[nextIndex:]
                 appendEntriesArgs.IsHeartbeat = false
             } else {
                 appendEntriesArgs.Entries = make([]Entry, 0)
                 appendEntriesArgs.IsHeartbeat = true
             }
-            appendEntriesArgs.LeaderCommitIndex = rf.commitIndex
-
             if nextIndex - 1 < 0 || nextIndex - 1 >= len(rf.logs) {
                 println(strconv.Itoa(rf.me) + " nextIndex[" + strconv.Itoa(i) + "] " + strconv.Itoa(nextIndex) + " len(logs) " + strconv.Itoa(len(rf.logs)))
             }
-            appendEntriesArgs.PrevLogIndex = rf.logs[nextIndex - 1].Index
-            appendEntriesArgs.PrevLogTerm = rf.logs[nextIndex - 1].Term
+            appendEntriesArgs.PrevLogIndex = nextIndex - 1
+            appendEntriesArgs.PrevLogTerm = rf.logs[appendEntriesArgs.PrevLogIndex].Term
+            appendEntriesArgs.LeaderCommitIndex = rf.commitIndex
             result := AppendEntriesReply{}
             go func(server int) {
                 rf.sendAppendEntries(server, &appendEntriesArgs, &result)
@@ -632,11 +621,6 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
                 election(rf)
                     select {
                     case <-time.After(getRandomExpireTime()):
-                        rf.lock()
-                        rf.status = FOLLOWER
-                        rf.votedFor = -1
-                        rf.persist()
-                        rf.unLock()
                     case <-rf.timeReset:
                         rf.lock()
                         rf.status = FOLLOWER
@@ -667,10 +651,10 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
             select {
             case <-rf.timeToCommit:
                 rf.lock()
-                //println(strconv.Itoa(rf.me) + " rf.commitIndex " + strconv.Itoa(rf.commitIndex) + " rf.lastApplied " + strconv.Itoa(rf.lastApplied))
-                //println("rf " + strconv.Itoa(rf.me) + " len logs " + strconv.Itoa(len(rf.logs)))
-                //println("rf " + strconv.Itoa(rf.me) + " commitIndex " + strconv.Itoa(rf.commitIndex))
-                //println("rf " + strconv.Itoa(rf.me) + " last applied " + strconv.Itoa(rf.lastApplied))
+            //println(strconv.Itoa(rf.me) + " rf.commitIndex " + strconv.Itoa(rf.commitIndex) + " rf.lastApplied " + strconv.Itoa(rf.lastApplied))
+            //println("rf " + strconv.Itoa(rf.me) + " len logs " + strconv.Itoa(len(rf.logs)))
+            //println("rf " + strconv.Itoa(rf.me) + " commitIndex " + strconv.Itoa(rf.commitIndex))
+            //println("rf " + strconv.Itoa(rf.me) + " last applied " + strconv.Itoa(rf.lastApplied))
 
                 for rf.lastApplied < rf.commitIndex && rf.lastApplied + 1 < len(rf.logs) {
                     //println(lastAppliedIndex)

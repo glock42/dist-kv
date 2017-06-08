@@ -80,8 +80,9 @@ type Raft struct {
 
     status       Status
     beLeader     chan bool
-    timeReset    chan bool
     timeToCommit chan bool
+    grantVote    chan bool
+    getHeartBeat chan bool
 
     applyCh      chan ApplyMsg
     voteCount    int
@@ -247,7 +248,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
     receiverLastTerm := rf.getLastEntry().Term
     if (args.LastLogTerm > receiverLastTerm ) ||
             (args.LastLogTerm == receiverLastTerm && args.LastLogIndex >= receiverLastIndex) {
-        rf.timeReset <- true
+        rf.grantVote <- true
         rf.votedFor = args.CandidateId
         reply.VoteGranted = true
     } else {
@@ -262,7 +263,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     defer rf.unLock()
     defer rf.persist()
     if args.IsHeartbeat {
-        println(strconv.Itoa(rf.me) + " recive heartbeat")
+        //println(strconv.Itoa(rf.me) + " recive heartbeat")
     } else {
         //println(strconv.Itoa(rf.me) + " recive append entry")
     }
@@ -276,12 +277,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         return
     }
 
-    if rf.status == FOLLOWER {
-        rf.timeReset <- true
-    } else if rf.status == CANDIDATE {
-        rf.timeReset <- true
-        rf.status = FOLLOWER
-    }
+    rf.getHeartBeat <- true
 
     if args.Term > rf.currentTerm {
         rf.currentTerm = args.Term
@@ -309,8 +305,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         return
     }
 
+    rf.logs = rf.logs[: args.PrevLogIndex + 1]
     if !args.IsHeartbeat {
-        rf.logs = rf.logs[: args.PrevLogIndex + 1]
         rf.logs = append(rf.logs, args.Entries...)
         println(strconv.Itoa(rf.me) + " append " + strconv.Itoa(len(args.Entries)) + " entry")
     }
@@ -373,14 +369,23 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
     rf.lock()
     defer rf.unLock()
     //fmt.Printf("%d send request to %d\n", rf.me, index)
-    if ok && reply.Term > rf.currentTerm {
+    if !ok {
+        return ok
+    }
+    if rf.status != CANDIDATE {
+        return ok
+    }
+    if args.Term != rf.currentTerm {
+        return ok
+    }
+    if reply.Term > rf.currentTerm {
         rf.currentTerm = reply.Term
         rf.votedFor = -1
         rf.status = FOLLOWER
         rf.persist()
         return ok
     }
-    if ok && reply.VoteGranted && rf.status != LEADER {
+    if reply.VoteGranted && rf.status == CANDIDATE {
         rf.voteCount++
         if rf.voteCount > len(rf.peers) / 2 {
             //println(strconv.Itoa(rf.me) + " get leader ----------")
@@ -392,15 +397,25 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
     ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+    rf.lock()
+    defer rf.unLock()
 
     if !ok {
         return ok
     }
+
+    if rf.status != LEADER {
+        return ok
+    }
+
+    if args.Term != rf.currentTerm {
+        return ok
+    }
+
     if !args.IsHeartbeat {
         fmt.Printf("%d send entry to %d \n", rf.me, server)
     }
-    rf.lock()
-    defer rf.unLock()
+
     if reply.Term > rf.currentTerm {
         rf.currentTerm = reply.Term
         fmt.Printf("---------------------------------------------------------------------- leader %d become follower\n", rf.me)
@@ -409,12 +424,11 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
         rf.persist()
         return ok
     }
-    if args.IsHeartbeat {
-        return ok
-    }
     if reply.Success {
-        rf.nextIndex[server] = rf.getLastEntry().Index + 1
-        rf.matchIndex[server] = rf.nextIndex[server] - 1
+        if !args.IsHeartbeat {
+            rf.nextIndex[server] = args.Entries[len(args.Entries) - 1].Index + 1
+            rf.matchIndex[server] = rf.nextIndex[server] - 1
+        }
     } else {
         rf.nextIndex[server] = reply.NextIndex
     }
@@ -467,7 +481,8 @@ func (rf *Raft) Kill() {
 }
 
 func getRandomExpireTime() time.Duration {
-    return time.Duration(rand.Int63n(300 - 150) + 150) * time.Millisecond
+    return time.Duration(rand.Int63() % 333 + 550) * time.Millisecond
+    //return time.Duration(rand.Int63n(300 - 150) + 150) * time.Millisecond
 }
 
 func election(rf *Raft) {
@@ -516,7 +531,6 @@ func broadcastAppendEntries(rf *Raft) {
         //fmt.Printf("\n")
     }
     rf.timeToCommit <- true
-    rf.persist()
 
     for i := range rf.peers {
         if i != rf.me && rf.status == LEADER {
@@ -586,8 +600,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
     rf.status = FOLLOWER
     rf.beLeader = make(chan bool, 1)
-    rf.timeReset = make(chan bool, 1)
     rf.timeToCommit = make(chan bool, 1)
+    rf.grantVote = make(chan bool, 1)
+    rf.getHeartBeat = make(chan bool, 1)
 
     rf.logs = make([]Entry, 1)
     rf.commitIndex = 0
@@ -612,7 +627,8 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
                         rf.status = CANDIDATE
                         rf.persist()
                         rf.unLock()
-                    case <-rf.timeReset:
+                    case <-rf.getHeartBeat:
+                    case <-rf.grantVote:
                     }
             case LEADER:
                 broadcastAppendEntries(rf)
@@ -621,7 +637,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
                 election(rf)
                     select {
                     case <-time.After(getRandomExpireTime()):
-                    case <-rf.timeReset:
+                    case <-rf.getHeartBeat:
                         rf.lock()
                         rf.status = FOLLOWER
                         rf.votedFor = -1

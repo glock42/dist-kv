@@ -25,8 +25,6 @@ import (
     "math/rand"
     "bytes"
     "encoding/gob"
-    "strconv"
-    "fmt"
 )
 
 // import "bytes"
@@ -308,7 +306,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     rf.logs = rf.logs[: args.PrevLogIndex + 1]
     if !args.IsHeartbeat {
         rf.logs = append(rf.logs, args.Entries...)
-        println(strconv.Itoa(rf.me) + " append " + strconv.Itoa(len(args.Entries)) + " entry")
+        //println(strconv.Itoa(rf.me) + " append " + strconv.Itoa(len(args.Entries)) + " entry")
     }
 
     if rf.commitIndex < args.LeaderCommitIndex {
@@ -320,9 +318,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         rf.timeToCommit <- true
     }
 
-    println("rf " + strconv.Itoa(rf.me) + " len logs " + strconv.Itoa(len(rf.logs)))
-    println("rf " + strconv.Itoa(rf.me) + " commitIndex " + strconv.Itoa(rf.commitIndex))
-    println("rf " + strconv.Itoa(rf.me) + " last applied " + strconv.Itoa(rf.lastApplied))
+    //println("rf " + strconv.Itoa(rf.me) + " len logs " + strconv.Itoa(len(rf.logs)))
+    //println("rf " + strconv.Itoa(rf.me) + " commitIndex " + strconv.Itoa(rf.commitIndex))
+    //println("rf " + strconv.Itoa(rf.me) + " last applied " + strconv.Itoa(rf.lastApplied))
     reply.Success = true
 }
 
@@ -331,7 +329,7 @@ func (rf *Raft) applyCommand(entry Entry) {
     applyCh.Index = entry.Index
     applyCh.Command = entry.Command
     rf.applyCh <- applyCh
-    println(strconv.Itoa(rf.me) + " apply ***************************** " + strconv.Itoa(entry.Command.(int)))
+    //println(strconv.Itoa(rf.me) + " apply ***************************** " + strconv.Itoa(entry.Command.(int)))
     rf.lastApplied ++
 }
 //
@@ -413,12 +411,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
     }
 
     if !args.IsHeartbeat {
-        fmt.Printf("%d send entry to %d \n", rf.me, server)
+        //fmt.Printf("%d send entry to %d \n", rf.me, server)
     }
 
     if reply.Term > rf.currentTerm {
         rf.currentTerm = reply.Term
-        fmt.Printf("---------------------------------------------------------------------- leader %d become follower\n", rf.me)
+        //fmt.Printf("---------------------------------------------------------------------- leader %d become follower\n", rf.me)
         rf.status = FOLLOWER
         rf.votedFor = -1
         rf.persist()
@@ -456,7 +454,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
     rf.lock()
     // Your code here (2B).
     if rf.status == LEADER {
-        println(strconv.Itoa(rf.me) + " ------ start ----- cmd " + strconv.Itoa(command.(int)))
+        //println(strconv.Itoa(rf.me) + " ------ start ----- cmd " + strconv.Itoa(command.(int)))
         index = rf.getLastEntry().Index + 1
         entry := Entry{index, rf.currentTerm, command}
         rf.logs = append(rf.logs, entry)
@@ -481,8 +479,7 @@ func (rf *Raft) Kill() {
 }
 
 func getRandomExpireTime() time.Duration {
-    return time.Duration(rand.Int63() % 333 + 550) * time.Millisecond
-    //return time.Duration(rand.Int63n(300 - 150) + 150) * time.Millisecond
+    return time.Duration(rand.Int63n(300 - 150) + 150) * time.Millisecond
 }
 
 func election(rf *Raft) {
@@ -555,7 +552,7 @@ func broadcastAppendEntries(rf *Raft) {
                 appendEntriesArgs.IsHeartbeat = true
             }
             if nextIndex - 1 < 0 || nextIndex - 1 >= len(rf.logs) {
-                println(strconv.Itoa(rf.me) + " nextIndex[" + strconv.Itoa(i) + "] " + strconv.Itoa(nextIndex) + " len(logs) " + strconv.Itoa(len(rf.logs)))
+                //println(strconv.Itoa(rf.me) + " nextIndex[" + strconv.Itoa(i) + "] " + strconv.Itoa(nextIndex) + " len(logs) " + strconv.Itoa(len(rf.logs)))
             }
             appendEntriesArgs.PrevLogIndex = nextIndex - 1
             appendEntriesArgs.PrevLogTerm = rf.logs[appendEntriesArgs.PrevLogIndex].Term
@@ -618,11 +615,11 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
         for {
             switch rf.status {
             case FOLLOWER:
-                println(strconv.Itoa(rf.me) + " start follower")
+                //println(strconv.Itoa(rf.me) + " start follower")
                     select {
                     case <-time.After(getRandomExpireTime()):
                         rf.lock()
-                        println(strconv.Itoa(rf.me) + " be Candidate")
+                        //println(strconv.Itoa(rf.me) + " be Candidate")
                         rf.votedFor = -1
                         rf.status = CANDIDATE
                         rf.persist()
@@ -655,7 +652,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
                             rf.matchIndex[i] = 0
                         }
                         rf.unLock()
-                        println(strconv.Itoa(rf.me) + " be leader ------------")
+                        //println(strconv.Itoa(rf.me) + " be leader ------------")
                     }
             }
         }

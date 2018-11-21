@@ -25,11 +25,11 @@ import (
     "math/rand"
     "bytes"
     "encoding/gob"
-)
+    "strconv"
+    )
 
 // import "bytes"
 // import "encoding/gob"
-
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -99,11 +99,12 @@ func (rf *Raft) GetState() (int, bool) {
     var term int
     var isLeader bool
     // Your code here (2A).
+    Log("server %d getstate\n", rf.me)
     rf.lock()
     term = rf.currentTerm
     isLeader = rf.status == LEADER
     rf.unLock()
-
+    Log("server %d getstate return\n", rf.me)
     return term, isLeader
 }
 
@@ -269,7 +270,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     //println("args.Term" + strconv.Itoa(args.Term))
 
     if args.Term < rf.currentTerm {
-        reply.Term = rf.currentTerm;
+        reply.Term = rf.currentTerm
         reply.Success = false
         reply.NextIndex = rf.getLastEntry().Index + 1
         return
@@ -283,7 +284,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         rf.votedFor = -1
     }
 
-    reply.Term = rf.currentTerm;
+    reply.Term = rf.currentTerm
 
     if args.PrevLogIndex > rf.getLastEntry().Index {
         reply.Success = false
@@ -293,6 +294,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
     if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm {
         reply.Success = false
+        // bypass all of the conflicting entries in this term
         term := rf.logs[args.PrevLogIndex].Term
         for i := args.PrevLogIndex - 1; i >= 0; i-- {
             if rf.logs[i].Term != term {
@@ -328,8 +330,10 @@ func (rf *Raft) applyCommand(entry Entry) {
     applyCh := ApplyMsg{}
     applyCh.Index = entry.Index
     applyCh.Command = entry.Command
+    rf.unLock()
     rf.applyCh <- applyCh
     //println(strconv.Itoa(rf.me) + " apply ***************************** " + strconv.Itoa(entry.Command.(int)))
+    rf.lock()
     rf.lastApplied ++
 }
 //
@@ -451,6 +455,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
     term := -1
     isLeader := true
 
+    Log("server %d Start", rf.me)
     rf.lock()
     // Your code here (2B).
     if rf.status == LEADER {
@@ -465,6 +470,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
     term = rf.currentTerm
     rf.unLock()
+    Log("server %d Start over", rf.me)
     return index, term, isLeader
 }
 
@@ -527,11 +533,13 @@ func broadcastAppendEntries(rf *Raft) {
         }
         //fmt.Printf("\n")
     }
-    rf.timeToCommit <- true
+    if rf.lastApplied < rf.commitIndex && rf.lastApplied+1 < len(rf.logs) {
+        rf.timeToCommit <- true
+    }
 
     for i := range rf.peers {
         if i != rf.me && rf.status == LEADER {
-            appendEntriesArgs := AppendEntriesArgs{};
+            appendEntriesArgs := AppendEntriesArgs{}
             appendEntriesArgs.Term = rf.currentTerm
             appendEntriesArgs.LeaderId = rf.me
             //println("logs size " + strconv.Itoa(len(rf.logs)))
@@ -615,45 +623,47 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
         for {
             switch rf.status {
             case FOLLOWER:
-                //println(strconv.Itoa(rf.me) + " start follower")
-                    select {
-                    case <-time.After(getRandomExpireTime()):
-                        rf.lock()
-                        //println(strconv.Itoa(rf.me) + " be Candidate")
-                        rf.votedFor = -1
-                        rf.status = CANDIDATE
-                        rf.persist()
-                        rf.unLock()
-                    case <-rf.getHeartBeat:
-                    case <-rf.grantVote:
-                    }
+                Log("server " +  strconv.Itoa(rf.me) + " start follower")
+                select {
+                case <-time.After(getRandomExpireTime()):
+                    rf.lock()
+                    Log("server " + strconv.Itoa(rf.me) + " be Candidate")
+                    rf.votedFor = -1
+                    rf.status = CANDIDATE
+                    rf.persist()
+                    rf.unLock()
+                case <-rf.getHeartBeat:
+                case <-rf.grantVote:
+                }
             case LEADER:
                 broadcastAppendEntries(rf)
                 time.Sleep(time.Duration(HEARTBEAT_TIME) * time.Millisecond)
             case CANDIDATE:
                 election(rf)
-                    select {
-                    case <-time.After(getRandomExpireTime()):
-                    case <-rf.getHeartBeat:
-                        rf.lock()
-                        rf.status = FOLLOWER
-                        rf.votedFor = -1
-                        rf.persist()
-                        rf.unLock()
-                    case <-rf.beLeader:
-                        rf.lock()
-                        rf.status = LEADER
-                        rf.nextIndex = make([]int, len(rf.peers))
-                        for i := 0; i < len(rf.peers); i++ {
-                            rf.nextIndex[i] = rf.getLastEntry().Index + 1
-                        }
-                        rf.matchIndex = make([]int, len(rf.peers))
-                        for i := 0; i < len(rf.peers); i++ {
-                            rf.matchIndex[i] = 0
-                        }
-                        rf.unLock()
-                        //println(strconv.Itoa(rf.me) + " be leader ------------")
-                    }
+				select {
+				case <-time.After(getRandomExpireTime()):
+				case <-rf.getHeartBeat:
+					rf.lock()
+                    //println(strconv.Itoa(rf.me) + "candidate get heartbeat and be follower")
+					rf.status = FOLLOWER
+					rf.votedFor = -1
+					rf.persist()
+					rf.unLock()
+				case <-rf.beLeader:
+					rf.lock()
+					rf.status = LEADER
+                    Log("server " + strconv.Itoa(rf.me) + " becomes leader")
+					rf.nextIndex = make([]int, len(rf.peers))
+					for i := 0; i < len(rf.peers); i++ {
+						rf.nextIndex[i] = rf.getLastEntry().Index + 1
+					}
+					rf.matchIndex = make([]int, len(rf.peers))
+					for i := 0; i < len(rf.peers); i++ {
+						rf.matchIndex[i] = 0
+					}
+					rf.unLock()
+					//println(strconv.Itoa(rf.me) + " be leader ------------")
+				}
             }
         }
 
@@ -663,6 +673,10 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
         for {
             select {
             case <-rf.timeToCommit:
+                Log("server %d, len(log): %d, rf.lastApplied: %d, rf.commitIndex: %d\n", rf.me,
+                    len(rf.logs), rf.lastApplied, rf.commitIndex)
+                Log("server %d apply command\n", rf.me)
+
                 rf.lock()
             //println(strconv.Itoa(rf.me) + " rf.commitIndex " + strconv.Itoa(rf.commitIndex) + " rf.lastApplied " + strconv.Itoa(rf.lastApplied))
             //println("rf " + strconv.Itoa(rf.me) + " len logs " + strconv.Itoa(len(rf.logs)))
@@ -674,6 +688,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
                     rf.applyCommand(rf.logs[rf.lastApplied + 1])
                 }
                 rf.unLock()
+                Log("server %d apply command over\n", rf.me)
             }
         }
     }(rf)

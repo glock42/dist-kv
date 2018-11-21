@@ -3,25 +3,23 @@ package raftkv
 import (
 	"encoding/gob"
 	"labrpc"
-	"log"
 	"raft"
 	"sync"
+	)
+
+const (
+	PUT = "PUT"
+	APPEND = "APPEND"
 )
-
-const Debug = 0
-
-func DPrintf(format string, a ...interface{}) (n int, err error) {
-	if Debug > 0 {
-		log.Printf(format, a...)
-	}
-	return
-}
 
 
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Key string
+	Value string
+	Operation string
 }
 
 type RaftKV struct {
@@ -33,15 +31,48 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	store map[string]string
+	putChan chan bool
 }
 
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	_, isLeader := kv.rf.GetState()
+	raft.Log("server.go: server %d Get, {key: %s}, isLeader: %t \n", kv.me, args.Key, isLeader)
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+
+	reply.WrongLeader = false
+
+	value, ok := kv.store[args.Key]
+	if ok {
+		reply.Value = value
+	} else {
+		reply.Value = ""
+	}
+
+
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+	raft.Log("server.go: server %d PutAppend, {key: %s, value: %s, op: %s} \n",
+		kv.me, args.Key, args.Value, args.Op)
+	reply.WrongLeader = false
+
+	kv.rf.Start(Op{args.Key, args.Value, args.Op})
+	<- kv.putChan
+	raft.Log("server.go: server %d PutAppend over, {key: %s, value: %s, op: %s}, leader: %t \n",
+		kv.me, args.Key, args.Value, args.Op, isLeader)
 }
 
 //
@@ -83,6 +114,33 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	kv.putChan = make(chan bool, 1)
+	kv.store = make(map[string]string)
+
+	go waitToApply(kv)
 
 	return kv
+}
+
+func waitToApply(kv *RaftKV) {
+
+	for {
+		applyMsg := <- kv.applyCh
+		op := applyMsg.Command.(Op)
+		if op.Operation == APPEND {
+			value, _ := kv.store[op.Key]
+			kv.store[op.Key] = value + op.Value
+		} else {
+			kv.store[op.Key] = op.Value
+		}
+		_, isLeader := kv.rf.GetState()
+		raft.Log("server.go: server %d waitToApply, apply op: {key: %s, value: %s}, isLeader: %t \n",
+			kv.me, op.Key, op.Value, isLeader)
+		if isLeader {
+			kv.putChan <- true
+		}
+		raft.Log("server.go: server %d waitToApply over, apply op: {key: %s, value: %s}, isLeader: %t \n",
+			kv.me, op.Key, op.Value, isLeader)
+	}
+
 }

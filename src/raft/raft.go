@@ -95,17 +95,7 @@ type Entry struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-    var term int
-    var isLeader bool
-    // Your code here (2A).
-    Log("server %d getstate\n", rf.me)
-    rf.lock()
-    term = rf.currentTerm
-    isLeader = rf.status == LEADER
-    rf.unLock()
-    Log("server %d getstate return\n", rf.me)
-    return term, isLeader
+    return rf.currentTerm,  rf.status == LEADER
 }
 
 func (rf *Raft) getLastEntry() Entry {
@@ -330,10 +320,8 @@ func (rf *Raft) applyCommand(entry Entry) {
     applyCh := ApplyMsg{}
     applyCh.Index = entry.Index
     applyCh.Command = entry.Command
-    rf.unLock()
     rf.applyCh <- applyCh
     //println(strconv.Itoa(rf.me) + " apply ***************************** " + strconv.Itoa(entry.Command.(int)))
-    rf.lock()
     rf.lastApplied ++
 }
 //

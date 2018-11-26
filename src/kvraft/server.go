@@ -17,9 +17,11 @@ type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Key string
-	Value string
+	Key       string
+	Value     string
 	Operation string
+	ClientId  int64
+	ReqId     int64
 }
 
 type RaftKV struct {
@@ -32,6 +34,7 @@ type RaftKV struct {
 
 	// Your definitions here.
 	store map[string]string
+	executed map[int64]int64
 	putChan chan bool
 }
 
@@ -46,8 +49,9 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	}
 
 	reply.WrongLeader = false
-
+	kv.mu.Lock()
 	value, ok := kv.store[args.Key]
+	kv.mu.Unlock()
 	if ok {
 		reply.Value = value
 	} else {
@@ -69,7 +73,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		kv.me, args.Key, args.Value, args.Op)
 	reply.WrongLeader = false
 
-	kv.rf.Start(Op{args.Key, args.Value, args.Op})
+	kv.rf.Start(Op{args.Key, args.Value, args.Op, args.Id, args.ReqId})
 	<- kv.putChan
 	raft.Log("server.go: server %d PutAppend over, {key: %s, value: %s, op: %s}, leader: %t \n",
 		kv.me, args.Key, args.Value, args.Op, isLeader)
@@ -116,6 +120,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.putChan = make(chan bool, 1)
 	kv.store = make(map[string]string)
+	kv.executed = make(map[int64]int64)
 
 	go waitToApply(kv)
 
@@ -126,16 +131,27 @@ func waitToApply(kv *RaftKV) {
 
 	for {
 		applyMsg := <- kv.applyCh
+		raft.Log("server.go: server %d start to ToApply \n",
+			kv.me)
 		op := applyMsg.Command.(Op)
-		if op.Operation == APPEND {
-			value, _ := kv.store[op.Key]
-			kv.store[op.Key] = value + op.Value
+		kv.mu.Lock()
+		executedReqId, _ := kv.executed[op.ClientId]
+
+		if op.ReqId > executedReqId {
+			if op.Operation == APPEND {
+				value, _ := kv.store[op.Key]
+				kv.store[op.Key] = value + op.Value
+			} else {
+				kv.store[op.Key] = op.Value
+			}
+			kv.executed[op.ClientId] = op.ReqId
 		} else {
-			kv.store[op.Key] = op.Value
+			raft.Log("server.go: server %d waitToApply failed, op: {key: %s, value: %s}," +
+				" clientId %d, reqId %d\n", kv.me, op.Key, op.Value, op.ClientId, op.ReqId)
 		}
+
+		kv.mu.Unlock()
 		_, isLeader := kv.rf.GetState()
-		raft.Log("server.go: server %d waitToApply, apply op: {key: %s, value: %s}, isLeader: %t \n",
-			kv.me, op.Key, op.Value, isLeader)
 		if isLeader {
 			kv.putChan <- true
 		}

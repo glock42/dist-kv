@@ -5,11 +5,16 @@ import "crypto/rand"
 import  "raft"
 import (
 	"math/big"
-		)
+	"sync"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	possibleLeader int
+	reqId          int64
+	id             int64
+	mu             sync.Mutex
 }
 
 
@@ -23,6 +28,8 @@ func nrand() int64 {
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.servers = servers
+	ck.id = nrand()
+	ck.reqId = 1
 	// You'll have to add code here.
 	return ck
 }
@@ -42,24 +49,24 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 	//fmt.Printf("client.go: Get, {key: %s}\n", key)
 
-
 	result := ""
 
+	i := ck.possibleLeader
 	for {
-		for i := 0; i < len(ck.servers); i++ {
-			args := GetArgs{}
-			reply := GetReply{}
-			args.Key = key
-			raft.Log("client.go: call server Get, {key: %s}\n", key)
-			ok := ck.servers[i].Call("RaftKV.Get", &args, &reply)
+		args := GetArgs{}
+		reply := GetReply{}
+		args.Key = key
+		//raft.Log("client.go: call server Get, {key: %s}\n", key)
+		ok := ck.servers[i].Call("RaftKV.Get", &args, &reply)
 
-			if ok && !reply.WrongLeader {
-				result = reply.Value
-				raft.Log("client.go: call server Get return, {key: %s, value: %s}, reply{wrongLeader: %t}\n",
-					 key, reply.Value, reply.WrongLeader)
-				return result
-			}
+		if ok && !reply.WrongLeader {
+			result = reply.Value
+			raft.Log("client.go: call server Get return, {key: %s, value: %s}, reply{wrongLeader: %t}\n",
+				 key, reply.Value, reply.WrongLeader)
+			ck.possibleLeader = i
+			return result
 		}
+		i = (i + 1) % len(ck.servers)
 	}
 	// You will have to modify this function.
 	return result
@@ -78,24 +85,30 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 
-	raft.Log("client.go: PutAppend, {key: %s, value: %s, op: %s}\n", key, value, op)
+	ck.mu.Lock()
+	reqId := ck.reqId
+	ck.reqId += 1
+	ck.mu.Unlock()
 
+	i := ck.possibleLeader
 	for {
+		args := PutAppendArgs{}
+		reply := PutAppendReply{}
+		args.Key = key
+		args.Value = value
+		args.Op = op
+		args.ReqId = reqId
+		args.Id = ck.id
+		//raft.Log("client.go: PutAppend, {key: %s, value: %s, op: %s}\n",  key, value, op)
 
-		for i := 0; i < len(ck.servers); i++ {
-			args := PutAppendArgs{}
-			reply := PutAppendReply{}
-			args.Key = key
-			args.Value = value
-			args.Op = op
+		ok := ck.servers[i].Call("RaftKV.PutAppend", &args, &reply)
 
-			ok := ck.servers[i].Call("RaftKV.PutAppend", &args, &reply)
-
-			if ok && reply.WrongLeader == false {
-				raft.Log("client.go: PutAppend server return, {key: %s, value: %s, op: %s}\n", key, value, op)
-				return
-			}
+		if ok && reply.WrongLeader == false {
+			raft.Log("client.go: PutAppend server return, {key: %s, value: %s, op: %s}\n", key, value, op)
+			ck.possibleLeader = i
+			return
 		}
+		i = (i + 1) % len(ck.servers)
 	}
 }
 

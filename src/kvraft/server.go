@@ -5,13 +5,14 @@ import (
 	"labrpc"
 	"raft"
 	"sync"
-	)
+	"time"
+)
 
 const (
+	GET = "GET"
 	PUT = "PUT"
 	APPEND = "APPEND"
 )
-
 
 type Op struct {
 	// Your definitions here.
@@ -24,6 +25,11 @@ type Op struct {
 	ReqId     int64
 }
 
+type ApplyReply struct {
+	value string
+	err   string
+}
+
 type RaftKV struct {
 	mu      sync.Mutex
 	me      int
@@ -33,32 +39,95 @@ type RaftKV struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
-	store map[string]string
+	store    map[string]string
 	executed map[int64]int64
-	putChan chan bool
+	opChans  map[int64]chan ApplyReply
 }
 
+func (kv *RaftKV) startAgree(op Op) ApplyReply {
+
+	raft.Log("server.go: server %d startAgree, op: {key: %s, value: %s, op: %s}," +
+		" clientId %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId)
+
+	kv.rf.Start(op)
+	kv.mu.Lock()
+	opChan, ok := kv.opChans[op.ReqId]
+	if !ok {
+		kv.opChans[op.ReqId] = make(chan ApplyReply, 1)
+		opChan= kv.opChans[op.ReqId]
+	}
+	kv.mu.Unlock()
+	reply := ApplyReply{}
+	select {
+		case reply = <- opChan:
+		case <-time.After(1000 * time.Millisecond):
+			reply.err = ERROR
+	}
+	raft.Log("server.go: server %d startAgree over, op: {key: %s, value: %s, op: %s}," +
+		" clientId %d, reqId: %d, result: %s \n", kv.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId, reply.err)
+	return reply
+}
+
+func (kv *RaftKV) apply(op Op) ApplyReply {
+	raft.Log("server.go: server %d apply, op: {key: %s, value: %s, op: %s}," +
+		" clientId %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId)
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	reply := ApplyReply{}
+	reply.err = OK
+	reply.value = ""
+	executedReqId, _ := kv.executed[op.ClientId]
+	if op.ReqId > executedReqId {
+		if op.Operation == GET {
+			v, ok := kv.store[op.Key]
+			if ok {
+				reply.value = v
+			} else {
+				reply.err = ErrNoKey
+			}
+		} else if op.Operation == APPEND {
+			v, ok := kv.store[op.Key]
+			if ok {
+				kv.store[op.Key] = v + op.Value
+			} else {
+				reply.err = ErrNoKey
+			}
+		} else {
+			kv.store[op.Key] = op.Value
+		}
+		kv.executed[op.ClientId] = op.ReqId
+	} else {
+		//raft.Log("server.go: server %d waitToAggre failed, op: {key: %s, value: %s, op: %s}," +
+		//	" clientId %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId)
+		if op.Operation == GET {
+			reply.value = kv.store[op.Key]
+		}
+		reply.err = ErrDupReq
+	}
+	raft.Log("server.go: server %d apply over, op: {key: %s, value: %s, op: %s}," +
+		" clientId %d, reqId: %d, err: %s\n", kv.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId, reply.err)
+	return reply
+}
 
 func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
 	_, isLeader := kv.rf.GetState()
-	raft.Log("server.go: server %d Get, {key: %s}, isLeader: %t \n", kv.me, args.Key, isLeader)
 	if !isLeader {
 		reply.WrongLeader = true
 		return
 	}
 
+	raft.Log("server.go: server %d Get, {key: %s}, isLeader: %t, clientId: %d\n",
+		kv.me, args.Key, isLeader, args.Id)
+
 	reply.WrongLeader = false
-	kv.mu.Lock()
-	value, ok := kv.store[args.Key]
-	kv.mu.Unlock()
-	if ok {
-		reply.Value = value
-	} else {
-		reply.Value = ""
-	}
 
+	op := Op{args.Key, "", GET, args.Id, args.ReqId}
 
+	applyReply := kv.startAgree(op)
+
+	reply.Value = applyReply.value
+	reply.Err = Err(applyReply.err)
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -69,14 +138,18 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.WrongLeader = true
 		return
 	}
-	raft.Log("server.go: server %d PutAppend, {key: %s, value: %s, op: %s} \n",
-		kv.me, args.Key, args.Value, args.Op)
+	raft.Log("server.go: server %d PutAppend, {key: %s, value: %s, op: %s}, clientId: %d\n",
+		kv.me, args.Key, args.Value, args.Op, args.Id)
 	reply.WrongLeader = false
 
-	kv.rf.Start(Op{args.Key, args.Value, args.Op, args.Id, args.ReqId})
-	<- kv.putChan
-	raft.Log("server.go: server %d PutAppend over, {key: %s, value: %s, op: %s}, leader: %t \n",
-		kv.me, args.Key, args.Value, args.Op, isLeader)
+	op := Op{args.Key, args.Value, args.Op, args.Id, args.ReqId}
+
+	applyReply := kv.startAgree(op)
+
+	reply.Err = Err(applyReply.err)
+
+	raft.Log("server.go: server %d PutAppend over, {key: %s, value: %s, op: %s}, leader: %t, clientId: %d \n",
+		kv.me, args.Key, kv.store[op.Key], args.Op, isLeader, args.Id)
 }
 
 //
@@ -88,6 +161,7 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *RaftKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+	raft.Log("server.go: server %d killed\n", kv.me)
 }
 
 //
@@ -118,45 +192,37 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.putChan = make(chan bool, 1)
+	kv.opChans = make(map[int64]chan ApplyReply)
 	kv.store = make(map[string]string)
 	kv.executed = make(map[int64]int64)
 
-	go waitToApply(kv)
+	go waitToAgree(kv)
 
 	return kv
 }
 
-func waitToApply(kv *RaftKV) {
+func waitToAgree(kv *RaftKV) {
 
 	for {
 		applyMsg := <- kv.applyCh
-		raft.Log("server.go: server %d start to ToApply \n",
-			kv.me)
 		op := applyMsg.Command.(Op)
-		kv.mu.Lock()
-		executedReqId, _ := kv.executed[op.ClientId]
 
-		if op.ReqId > executedReqId {
-			if op.Operation == APPEND {
-				value, _ := kv.store[op.Key]
-				kv.store[op.Key] = value + op.Value
-			} else {
-				kv.store[op.Key] = op.Value
-			}
-			kv.executed[op.ClientId] = op.ReqId
-		} else {
-			raft.Log("server.go: server %d waitToApply failed, op: {key: %s, value: %s}," +
-				" clientId %d, reqId %d\n", kv.me, op.Key, op.Value, op.ClientId, op.ReqId)
-		}
-
-		kv.mu.Unlock()
 		_, isLeader := kv.rf.GetState()
-		if isLeader {
-			kv.putChan <- true
+
+		raft.Log("server.go: server %d waitToAgree , op: {key: %s, value: %s, op: %s}, " +
+			"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
+
+		reply := kv.apply(op)
+
+		if isLeader{
+			op, ok := kv.opChans[op.ReqId]
+			if ok {
+				op <- reply
+			}
 		}
-		raft.Log("server.go: server %d waitToApply over, apply op: {key: %s, value: %s}, isLeader: %t \n",
-			kv.me, op.Key, op.Value, isLeader)
+
+		raft.Log("server.go: server %d waitToAgree over, op: {key: %s, value: %s, op: %s}, " +
+			"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
 	}
 
 }

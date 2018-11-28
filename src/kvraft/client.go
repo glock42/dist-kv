@@ -6,7 +6,7 @@ import  "raft"
 import (
 	"math/big"
 	"sync"
-)
+	)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -47,19 +47,28 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-	//fmt.Printf("client.go: Get, {key: %s}\n", key)
+
 
 	result := ""
+	ck.mu.Lock()
+	reqId := ck.reqId
+	ck.reqId += 1
+	ck.mu.Unlock()
+
+	raft.Log("client.go: Get, {key: %s}, id: %d, reqId: %d\n", key, ck.id, reqId)
+	defer raft.Log("client.go: Get over, {key: %s}, id: %d, reqId: %d\n", key, ck.id, reqId)
 
 	i := ck.possibleLeader
 	for {
 		args := GetArgs{}
 		reply := GetReply{}
 		args.Key = key
+		args.ReqId = reqId
+		args.Id  = ck.id
 		//raft.Log("client.go: call server Get, {key: %s}\n", key)
 		ok := ck.servers[i].Call("RaftKV.Get", &args, &reply)
 
-		if ok && !reply.WrongLeader {
+		if ok && !reply.WrongLeader && (reply.Err == OK || reply.Err == ErrDupReq){
 			result = reply.Value
 			raft.Log("client.go: call server Get return, {key: %s, value: %s}, reply{wrongLeader: %t}\n",
 				 key, reply.Value, reply.WrongLeader)
@@ -85,10 +94,14 @@ func (ck *Clerk) Get(key string) string {
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
 
+
 	ck.mu.Lock()
 	reqId := ck.reqId
 	ck.reqId += 1
 	ck.mu.Unlock()
+
+	raft.Log("client.go: PutAppend, {key: %s, value: %s}, id: %d, reqId: %d\n", key, value, ck.id , reqId)
+	defer raft.Log("client.go: PutAppend over, {key: %s, value: %s}, id: %d, reqId: %d\n", key, value, ck.id, reqId)
 
 	i := ck.possibleLeader
 	for {
@@ -103,13 +116,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 		ok := ck.servers[i].Call("RaftKV.PutAppend", &args, &reply)
 
-		if ok && reply.WrongLeader == false {
+		if ok && reply.WrongLeader == false && (reply.Err == OK || reply.Err == ErrDupReq) {
 			raft.Log("client.go: PutAppend server return, {key: %s, value: %s, op: %s}\n", key, value, op)
 			ck.possibleLeader = i
 			return
 		}
 		i = (i + 1) % len(ck.servers)
 	}
+
 }
 
 func (ck *Clerk) Put(key string, value string) {

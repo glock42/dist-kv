@@ -1,8 +1,10 @@
 package raftkv
 
 const (
-	OK       = "OK"
-	ErrNoKey = "ErrNoKey"
+	OK        = "OK"
+	ErrNoKey  = "ErrNoKey"
+	ERROR     = "ERROR"
+	ErrDupReq = "ErrDupReq"
 )
 
 type Err string
@@ -29,6 +31,8 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	ReqId int64
+	Id    int64
 }
 
 type GetReply struct {

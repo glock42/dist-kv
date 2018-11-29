@@ -41,7 +41,7 @@ type RaftKV struct {
 	// Your definitions here.
 	store    map[string]string
 	executed map[int64]int64
-	opChans  map[int64]chan ApplyReply
+	opChans  map[int]chan ApplyReply
 }
 
 func (kv *RaftKV) startAgree(op Op) ApplyReply {
@@ -49,17 +49,22 @@ func (kv *RaftKV) startAgree(op Op) ApplyReply {
 	raft.Log("server.go: server %d startAgree, op: {key: %s, value: %s, op: %s}," +
 		" clientId %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId)
 
-	kv.rf.Start(op)
+	index, term, _ :=kv.rf.Start(op)
 	kv.mu.Lock()
-	opChan, ok := kv.opChans[op.ReqId]
+	opChan, ok := kv.opChans[index]
 	if !ok {
-		kv.opChans[op.ReqId] = make(chan ApplyReply, 1)
-		opChan= kv.opChans[op.ReqId]
+		kv.opChans[index] = make(chan ApplyReply, 1)
+		opChan= kv.opChans[index]
 	}
 	kv.mu.Unlock()
 	reply := ApplyReply{}
 	select {
 		case reply = <- opChan:
+			curTerm, isLeader := kv.rf.GetState()
+			if !isLeader || term != curTerm {
+				reply.value = ""
+				reply.err = ERROR
+			}
 		case <-time.After(1000 * time.Millisecond):
 			reply.err = ERROR
 	}
@@ -128,6 +133,9 @@ func (kv *RaftKV) Get(args *GetArgs, reply *GetReply) {
 
 	reply.Value = applyReply.value
 	reply.Err = Err(applyReply.err)
+
+	raft.Log("server.go: server %d Get over, {key: %s, value: %s}, isLeader: %t, clientId: %d, err: %s\n",
+		kv.me, args.Key, reply.Value, isLeader, args.Id, reply.Err)
 }
 
 func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
@@ -148,8 +156,8 @@ func (kv *RaftKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	reply.Err = Err(applyReply.err)
 
-	raft.Log("server.go: server %d PutAppend over, {key: %s, value: %s, op: %s}, leader: %t, clientId: %d \n",
-		kv.me, args.Key, kv.store[op.Key], args.Op, isLeader, args.Id)
+	raft.Log("server.go: server %d PutAppend over, {key: %s, value: %s, op: %s}, leader: %t, clientId: %d, err: %s \n",
+		kv.me, args.Key, kv.store[op.Key], args.Op, isLeader, args.Id, reply.Err)
 }
 
 //
@@ -192,7 +200,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
-	kv.opChans = make(map[int64]chan ApplyReply)
+	kv.opChans = make(map[int]chan ApplyReply)
 	kv.store = make(map[string]string)
 	kv.executed = make(map[int64]int64)
 
@@ -215,7 +223,9 @@ func waitToAgree(kv *RaftKV) {
 		reply := kv.apply(op)
 
 		if isLeader{
-			op, ok := kv.opChans[op.ReqId]
+			kv.mu.Lock()
+			op, ok := kv.opChans[applyMsg.Index]
+			kv.mu.Unlock()
 			if ok {
 				op <- reply
 			}

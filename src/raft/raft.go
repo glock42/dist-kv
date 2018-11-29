@@ -36,6 +36,7 @@ import (
 // committed, the peer should send an ApplyMsg to the service (or
 // tester) on the same server, via the applyCh passed to Make().
 //
+
 type ApplyMsg struct {
     Index       int
     Command     interface{}
@@ -443,7 +444,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
     term := -1
     isLeader := true
 
-    Log("server %d Start", rf.me)
+    //Log("server %d Start", rf.me)
     rf.lock()
     // Your code here (2B).
     if rf.status == LEADER {
@@ -458,7 +459,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
     term = rf.currentTerm
     rf.unLock()
-    Log("server %d Start over", rf.me)
+    //Log("server %d Start over", rf.me)
     return index, term, isLeader
 }
 
@@ -515,6 +516,7 @@ func broadcastAppendEntries(rf *Raft) {
                 count++
             }
             if count > len(rf.matchIndex) / 2 {
+            	Log("server %d, update commitIndex {old: %d, new: %d} \n", rf.me, rf.commitIndex, N)
                 rf.commitIndex = N
                 break
             }
@@ -611,11 +613,11 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
         for {
             switch rf.status {
             case FOLLOWER:
-                Log("server " +  strconv.Itoa(rf.me) + " start follower")
+                //Log("server " +  strconv.Itoa(rf.me) + " start follower")
                 select {
                 case <-time.After(getRandomExpireTime()):
                     rf.lock()
-                    Log("server " + strconv.Itoa(rf.me) + " be Candidate")
+                    //Log("server " + strconv.Itoa(rf.me) + " be Candidate")
                     rf.votedFor = -1
                     rf.status = CANDIDATE
                     rf.persist()
@@ -624,6 +626,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
                 case <-rf.grantVote:
                 }
             case LEADER:
+            	//Log("server %d, broadcast append entries\n", rf.me, )
                 broadcastAppendEntries(rf)
                 time.Sleep(time.Duration(HEARTBEAT_TIME) * time.Millisecond)
             case CANDIDATE:
@@ -663,7 +666,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
             case <-rf.timeToCommit:
                 Log("server %d, len(log): %d, rf.lastApplied: %d, rf.commitIndex: %d\n", rf.me,
                     len(rf.logs), rf.lastApplied, rf.commitIndex)
-                Log("server %d apply command\n", rf.me)
+                //Log("server %d apply command\n", rf.me)
 
                 rf.lock()
             //println(strconv.Itoa(rf.me) + " rf.commitIndex " + strconv.Itoa(rf.commitIndex) + " rf.lastApplied " + strconv.Itoa(rf.lastApplied))
@@ -676,7 +679,7 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
                     rf.applyCommand(rf.logs[rf.lastApplied + 1])
                 }
                 rf.unLock()
-                Log("server %d apply command over\n", rf.me)
+                //Log("server %d apply command over\n", rf.me)
             }
         }
     }(rf)

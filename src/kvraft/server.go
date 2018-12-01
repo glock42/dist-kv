@@ -6,6 +6,7 @@ import (
 	"raft"
 	"sync"
 	"time"
+	"bytes"
 )
 
 const (
@@ -228,6 +229,17 @@ func waitToAgree(kv *RaftKV) {
 			kv.mu.Unlock()
 			if ok {
 				op <- reply
+			}
+
+			if kv.maxraftstate > kv.rf.GetRaftState() {
+				go func() {
+					w := new(bytes.Buffer)
+					e := gob.NewEncoder(w)
+					e.Encode(kv.opChans)
+					e.Encode(kv.store)
+					data := w.Bytes()
+					kv.rf.SnapShot(data, applyMsg.Index)
+				}()
 			}
 		}
 

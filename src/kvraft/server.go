@@ -214,37 +214,52 @@ func waitToAgree(kv *RaftKV) {
 
 	for {
 		applyMsg := <- kv.applyCh
-		op := applyMsg.Command.(Op)
 
-		_, isLeader := kv.rf.GetState()
+		if applyMsg.UseSnapshot {
+			r := bytes.NewBuffer(applyMsg.Snapshot)
+			d := gob.NewDecoder(r)
 
-		raft.Log("server.go: server %d waitToAgree , op: {key: %s, value: %s, op: %s}, " +
-			"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
-
-		reply := kv.apply(op)
-
-		if isLeader{
 			kv.mu.Lock()
-			op, ok := kv.opChans[applyMsg.Index]
+			kv.store = make(map[string]string)
+			kv.executed = make(map[int64]int64)
+			d.Decode(&kv.executed)
+			d.Decode(&kv.store)
 			kv.mu.Unlock()
-			if ok {
-				op <- reply
+
+		} else {
+
+			op := applyMsg.Command.(Op)
+
+			_, isLeader := kv.rf.GetState()
+
+			raft.Log("server.go: server %d waitToAgree , op: {key: %s, value: %s, op: %s}, "+
+				"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
+
+			reply := kv.apply(op)
+
+			if isLeader {
+				kv.mu.Lock()
+				op, ok := kv.opChans[applyMsg.Index]
+				kv.mu.Unlock()
+				if ok {
+					op <- reply
+				}
 			}
 
-			if kv.maxraftstate > kv.rf.GetRaftState() {
-				go func() {
-					w := new(bytes.Buffer)
-					e := gob.NewEncoder(w)
-					e.Encode(kv.opChans)
-					e.Encode(kv.store)
-					data := w.Bytes()
-					kv.rf.SnapShot(data, applyMsg.Index)
-				}()
+			if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate  {
+				raft.Log2("server.go: server %d, max_raft_state: %d, cur_raft_state: %d \n", kv.me, kv.maxraftstate, kv.rf.GetRaftStateSize())
+				w := new(bytes.Buffer)
+				e := gob.NewEncoder(w)
+				e.Encode(kv.executed)
+				e.Encode(kv.store)
+				data := w.Bytes()
+
+				go kv.rf.SnapShot(data, applyMsg.Index)
 			}
+
+			raft.Log("server.go: server %d waitToAgree over, op: {key: %s, value: %s, op: %s}, "+
+				"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
 		}
-
-		raft.Log("server.go: server %d waitToAgree over, op: {key: %s, value: %s, op: %s}, " +
-			"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
 	}
 
 }

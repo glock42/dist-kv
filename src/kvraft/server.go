@@ -1,12 +1,12 @@
 package raftkv
 
 import (
+	"bytes"
 	"encoding/gob"
 	"labrpc"
 	"raft"
 	"sync"
 	"time"
-	"bytes"
 )
 
 const (
@@ -194,7 +194,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv := new(RaftKV)
 	kv.me = me
 	kv.maxraftstate = maxraftstate
-
+	raft.Log2("server.go: server %d, max_raft_state: %d\n", kv.me, kv.maxraftstate)
 	// You may need initialization code here.
 
 	kv.applyCh = make(chan raft.ApplyMsg)

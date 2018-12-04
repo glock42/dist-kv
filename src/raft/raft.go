@@ -18,18 +18,17 @@ package raft
 //
 
 import (
-    "fmt"
     "sync"
 )
 import (
     "labrpc"
-    //"net"
-    "time"
-    "math/rand"
     "bytes"
     "encoding/gob"
+    "math/rand"
     "strconv"
-    )
+    //"net"
+    "time"
+)
 
 // import "bytes"
 // import "encoding/gob"
@@ -485,7 +484,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 
     if reply.Term > rf.currentTerm {
         rf.currentTerm = reply.Term
-        fmt.Printf("raft.go: server leader %d is stall, become follower\n", rf.me)
+        Log2("raft.go: server leader %d is stall, become follower\n", rf.me)
         rf.status = FOLLOWER
         rf.votedFor = -1
         rf.persist()

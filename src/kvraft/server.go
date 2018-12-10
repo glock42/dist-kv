@@ -246,6 +246,7 @@ func waitToAgree(kv *RaftKV) {
 				}
 			}
 
+			kv.mu.Lock()
 			if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate  {
 				raft.Log2("server.go: server %d, max_raft_state: %d, cur_raft_state: %d \n", kv.me, kv.maxraftstate, kv.rf.GetRaftStateSize())
 				w := new(bytes.Buffer)
@@ -253,10 +254,9 @@ func waitToAgree(kv *RaftKV) {
 				e.Encode(kv.executed)
 				e.Encode(kv.store)
 				data := w.Bytes()
-
 				go kv.rf.SnapShot(data, applyMsg.Index)
 			}
-
+			kv.mu.Unlock()
 			raft.Log("server.go: server %d waitToAgree over, op: {key: %s, value: %s, op: %s}, "+
 				"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
 		}

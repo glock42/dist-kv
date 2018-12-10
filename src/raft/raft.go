@@ -282,20 +282,25 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
     reply.Term = rf.currentTerm
 
-    if args.PrevLogIndex > rf.getLastEntry().Index {
+    if args.PrevLogIndex > rf.getLastEntry().Index || args.PrevLogIndex < rf.base {
         reply.Success = false
         reply.NextIndex = rf.getLastEntry().Index + 1
         return
     }
     if !args.IsHeartbeat {
-		 Log2("raft.go: server %d AppendEntries, rf.base: %d, len(rf.logs): %d, args.PrevLogIndex: %d, " +
+
+        Log2("raft.go: server %d AppendEntries, rf.base: %d, len(rf.logs): %d, args.PrevLogIndex: %d, " +
+            "rf.Term: %d, args.Term: %d, rf.status: %d\n",
+            rf.me, rf.base, len(rf.logs), args.PrevLogIndex, rf.currentTerm, args.Term, rf.status)
+
+		Log2("raft.go: server %d AppendEntries, rf.base: %d, len(rf.logs): %d, args.PrevLogIndex: %d, " +
 			"rf.Term: %d, args.Term: %d, rf.status: %d, prev log Index: %d, prev log term: %d\n",
 			rf.me, rf.base, len(rf.logs), args.PrevLogIndex, rf.currentTerm, args.Term, rf.status,
 			rf.logs[rf.getLogsIdx(args.PrevLogIndex)].Index, rf.logs[rf.getLogsIdx(args.PrevLogIndex)].Term)
     } else {
         Log2("raft.go: server %d Heartbeat, rf.base: %d, len(rf.logs): %d, " +
-            "args.LeaderCommitIndex: %d, rf.commitIndex: %d, rf.applyIndex: %d, rf.status: %d\n",
-			rf.me, rf.base, len(rf.logs), args.LeaderCommitIndex, rf.commitIndex, rf.lastApplied, rf.status)
+            "args.LeaderCommitIndex: %d, rf.commitIndex: %d, rf.applyIndex: %d, args.PrevLogIndex: %d, rf.status: %d\n",
+			rf.me, rf.base, len(rf.logs), args.LeaderCommitIndex, rf.commitIndex, rf.lastApplied, args.PrevLogIndex, rf.status)
     }
 
 
@@ -303,7 +308,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
         reply.Success = false
         // bypass all of the conflicting entries in this term
         term := rf.logs[rf.getLogsIdx(args.PrevLogIndex)].Term
-        for i := args.PrevLogIndex - 1; i >= 0; i-- {
+        for i := args.PrevLogIndex - 1; i >= rf.base; i-- {
             if rf.logs[rf.getLogsIdx(i)].Term != term {
                 reply.NextIndex = i + 1
                 break
@@ -351,19 +356,30 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
         rf.votedFor = -1
     }
 
+    Log2("raft.go: InstallSnapshot, args.LastIncludeIndex: %d, len(rf.logs): %d, rf.base: %d \n",
+        args.LastIncludedIndex, len(rf.logs), rf.base)
+
+
     newLogs := make([]Entry, 1)
     newLogs[0].Index = args.LastIncludedIndex
     newLogs[0].Term  = args.LastIncludedTerm
-    newLogs = append(newLogs, rf.logs[rf.getLogsIdx(args.LastIncludedIndex) + 1:]...)
+
+    if rf.getLogsIdx(args.LastIncludedIndex) > 0 && rf.getLogsIdx(args.LastIncludedIndex) < len(rf.logs)  {
+        newLogs = append(newLogs, rf.logs[rf.getLogsIdx(args.LastIncludedIndex) + 1:]...)
+    }
+
     rf.base = args.LastIncludedIndex
     rf.logs = newLogs
 
+    rf.readSnapshot(args.Data)
     Log2("raft.go: server %d, truncate logs, rf.logs, len: %d\n", rf.me, len(rf.logs))
 
     rf.lastApplied =  args.LastIncludedIndex
     rf.commitIndex =  args.LastIncludedIndex
 
     rf.persister.SaveSnapshot(args.Data)
+    Log2("raft.go: InstallSnapshot over, rf.lastApplied: %d, rf.commitIndex: %d, len(rf.logs): %d, rf.base: %d \n",
+        rf.lastApplied, rf.commitIndex, len(rf.logs), rf.base)
 }
 
 func (rf *Raft) applyCommand(entry Entry) {
@@ -676,26 +692,29 @@ func (rf *Raft) unLock() {
 
 func (rf *Raft) SnapShot(data []byte, lastIncludeIndex int) {
     rf.lock()
-    defer rf.lock()
-    Log2("raft.go: server %d, start snapshot, lastIncludeIndex: %d\n", rf.me, lastIncludeIndex)
-    Log2("raft.go: server %d, start snapshot, rf.logs, len: %d\n", rf.me, len(rf.logs))
+    defer rf.unLock()
+    Log2("raft.go: server %d, start snapshot, lastIncludeIndex: %d, len(rf.logs): %d, rf.base: %d\n",
+        rf.me, lastIncludeIndex, len(rf.logs), rf.base)
 
-    newLogs := make([]Entry, 1)
-    lastIncludeEntry := rf.logs[rf.getLogsIdx(lastIncludeIndex)]
+    if lastIncludeIndex > rf.base {
 
-    newLogs[0].Index = lastIncludeEntry.Index
-    newLogs[0].Term  = lastIncludeEntry.Term
-    newLogs = append(newLogs, rf.logs[rf.getLogsIdx(lastIncludeIndex) + 1:]...)
-    rf.base = lastIncludeIndex
-    rf.logs = newLogs
+        newLogs := make([]Entry, 1)
+        lastIncludeEntry := rf.logs[rf.getLogsIdx(lastIncludeIndex)]
 
-    Log2("raft.go: server %d, truncate logs, rf.logs, len: %d\n", rf.me, len(rf.logs))
+        newLogs[0].Index = lastIncludeEntry.Index
+        newLogs[0].Term = lastIncludeEntry.Term
+        newLogs = append(newLogs, rf.logs[rf.getLogsIdx(lastIncludeIndex)+1:]...)
+        rf.base = lastIncludeIndex
+        rf.logs = newLogs
 
-    rf.lastApplied =  lastIncludeIndex
-    rf.commitIndex =  lastIncludeIndex
+        Log2("raft.go: server %d, truncate logs, rf.logs, len: %d\n", rf.me, len(rf.logs))
 
-    rf.persist()
-    rf.persister.SaveSnapshot(data)
+        rf.lastApplied = lastIncludeIndex
+        rf.commitIndex = lastIncludeIndex
+
+        rf.persist()
+        rf.persister.SaveSnapshot(data)
+    }
     Log2("raft.go: server %d, snapshot over, len(rf.logs): %d, lastApplied: %d, commitIndex: %d, rf.base: %d\n",
         rf.me, len(rf.logs), rf.lastApplied, rf.commitIndex, rf.base)
 }

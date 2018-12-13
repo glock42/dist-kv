@@ -50,7 +50,7 @@ func (kv *RaftKV) startAgree(op Op) ApplyReply {
 	raft.Log("server.go: server %d startAgree, op: {key: %s, value: %s, op: %s}," +
 		" clientId %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId)
 
-	index, term, _ :=kv.rf.Start(op)
+	index, term, _ := kv.rf.Start(op)
 	kv.mu.Lock()
 	opChan, ok := kv.opChans[index]
 	if !ok {

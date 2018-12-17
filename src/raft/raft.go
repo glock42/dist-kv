@@ -289,9 +289,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
     }
     if !args.IsHeartbeat {
 
-        Log2("raft.go: server %d AppendEntries, rf.base: %d, len(rf.logs): %d, args.PrevLogIndex: %d, " +
-            "rf.Term: %d, args.Term: %d, rf.status: %d\n",
-            rf.me, rf.base, len(rf.logs), args.PrevLogIndex, rf.currentTerm, args.Term, rf.status)
+        //Log2("raft.go: server %d AppendEntries, rf.base: %d, len(rf.logs): %d, args.PrevLogIndex: %d, " +
+        //    "rf.Term: %d, args.Term: %d, rf.status: %d\n",
+        //    rf.me, rf.base, len(rf.logs), args.PrevLogIndex, rf.currentTerm, args.Term, rf.status)
 
 		Log2("raft.go: server %d AppendEntries, rf.base: %d, len(rf.logs): %d, args.PrevLogIndex: %d, " +
 			"rf.Term: %d, args.Term: %d, rf.status: %d, prev log Index: %d, prev log term: %d\n",

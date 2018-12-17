@@ -40,6 +40,8 @@ const (
 const (
 	JOIN   = "JOIN"
 	LEAVE  = "LEAVE"
+	MOVE   = "MOVE"
+	QUERY  = "QUERY"
 )
 
 type Err string

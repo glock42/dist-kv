@@ -8,7 +8,6 @@ import (
 	"labrpc"
 	"sync"
 )
-import "time"
 import "crypto/rand"
 import "math/big"
 
@@ -62,7 +61,7 @@ func (ck *Clerk) Query(num int) Config {
 		}
 
 		i = (i + 1) % len(ck.servers)
-		time.Sleep(100 * time.Millisecond)
+		//time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -90,7 +89,7 @@ func (ck *Clerk) Join(servers map[int][]string) {
 		}
 
 		i = (i + 1) % len(ck.servers)
-		time.Sleep(100 * time.Millisecond)
+		//time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -118,7 +117,7 @@ func (ck *Clerk) Leave(gids []int) {
 		}
 
 		i = (i + 1) % len(ck.servers)
-		time.Sleep(100 * time.Millisecond)
+		//time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -148,6 +147,6 @@ func (ck *Clerk) Move(shard int, gid int) {
 		}
 
 		i = (i + 1) % len(ck.servers)
-		time.Sleep(100 * time.Millisecond)
+		//time.Sleep(100 * time.Millisecond)
 	}
 }

@@ -29,12 +29,15 @@ type ApplyReply struct {
 }
 
 type Op struct {
-	// Your data here.
-	Value1     interface{}
-	Value2     interface{}
 	Operation string
 	ClientId  int64
 	ReqId     int64
+
+	Servers map[int][]string
+	GIDs    []int
+	Shard   int
+	GID     int
+	Num     int
 }
 
 func (sm *ShardMaster) startAgree(op Op) ApplyReply {
@@ -78,21 +81,154 @@ func (sm *ShardMaster) copyConfig(source *Config, dest *Config) {
 	}
 }
 
-func (sm *ShardMaster) reBalance(config *Config) {
+func (sm *ShardMaster) reBalance(config *Config, joinGids map[int]bool, leaveGids map[int]bool) {
 	NGroup := len(config.Groups)
-	gids := make([]int, 0)
-	for gid, _ := range config.Groups {
-		gids = append(gids, gid)
+	avg := NShards / NGroup
+
+	gid2ShardsNum := make(map[int]int)
+	lessThanAvg := make([]int, 0)
+	moreThanAvg := make([]int, 0)
+	equalAvg := make([]int, 0)
+
+	for _, gid := range config.Shards {
+		if gid == 0 {
+			continue
+		}
+		gid2ShardsNum[gid] += 1
 	}
 
-	interval := NShards / NGroup
+	for gid := range joinGids {
+		gid2ShardsNum[gid] = 0
+	}
+
+	for gid, num := range gid2ShardsNum {
+		if num < avg {
+			lessThanAvg = append(lessThanAvg, gid)
+		} else if num > avg {
+			moreThanAvg = append(moreThanAvg, gid)
+		} else {
+			equalAvg = append(equalAvg, gid)
+		}
+	}
+
+
+	for i, gid := range config.Shards {
+		num, _ := gid2ShardsNum[gid]
+
+		if _, ok := leaveGids[gid]; ok || num > avg {
+			if len(lessThanAvg) > 0 {
+				lessThanAvgGid := lessThanAvg[0]
+				config.Shards[i] = lessThanAvgGid
+				gid2ShardsNum[gid] -= 1
+				gid2ShardsNum[lessThanAvgGid] += 1
+				if gid2ShardsNum[lessThanAvgGid] >= avg {
+					lessThanAvg = lessThanAvg[1:]
+				}
+			}
+		} else if num < avg {
+			if len(moreThanAvg) > 0 {
+				moreThanAvgGid := moreThanAvg[0]
+				config.Shards[i] = gid
+				gid2ShardsNum[moreThanAvgGid] -= 1
+				gid2ShardsNum[gid] +=1
+				if gid2ShardsNum[moreThanAvgGid] <= avg {
+					moreThanAvg = moreThanAvg[1:]
+				}
+			}
+		}
+	}
+}
+
+func (sm *ShardMaster) joinBalance(config *Config, joinGids []int) {
+	NGroup := len(config.Groups)
+	avg := NShards / NGroup
+
+	gid2Shards := make(map[int][]int)
+	joinGid2ShardsNum := make(map[int]int)
+	moreThanAvg := make(map[int][]int)
+
+	for i, gid := range config.Shards {
+		gid2Shards[gid] = append(gid2Shards[gid], i)
+	}
+
+	for gid, shards := range gid2Shards {
+		if gid == 0 || len(shards) > avg {
+			moreThanAvg[gid] = shards
+		}
+	}
+
 	i := 0
-	for ; i < interval * NGroup; i += interval {
-		if i > NShards {
+	dispatch := true
+	for gid, shards := range moreThanAvg {
+		split := avg
+		if gid == 0 {
+			split = 0
+		}
+		for shard := range shards[split: ]{
+			config.Shards[shard] = joinGids[i]
+			joinGid2ShardsNum[joinGids[i]] += 1
+			if joinGid2ShardsNum[joinGids[i]] >= avg  {
+				if i+1 >= len(joinGids) {
+					if gid != 0 {
+						dispatch = false
+						break
+					}
+				} else  {
+					i++
+				}
+			}
+		}
+		if !dispatch {
 			break
 		}
-		for j := i; j < j+interval; j++ {
-			config.Shards[j] = gids[i / interval]
+	}
+}
+
+func (sm *ShardMaster) leaveBalance(config *Config, leaveGids []int) {
+	NGroup := len(config.Groups)
+	if NGroup == 0 {
+		for i := 0; i < len(config.Shards); i++{
+			config.Shards[i] = 0
+		}
+		return
+	}
+	avg := NShards / NGroup
+
+	gid2Shards := make(map[int][]int)
+	lessThanAvg := make([]int, 0)
+
+	for i, gid := range config.Shards {
+		gid2Shards[gid] = append(gid2Shards[gid], i)
+	}
+
+	for gid, shards := range gid2Shards {
+		isLeave := false
+		for _, leaveGid := range leaveGids {
+			if gid == leaveGid {
+				isLeave = true
+				break
+			}
+		}
+
+		if !isLeave && len(shards) < avg {
+			lessThanAvg = append(lessThanAvg, gid)
+		}
+	}
+
+	i := 0
+	for _, gid := range leaveGids {
+		shards := gid2Shards[gid]
+		for _, shard := range shards {
+
+			if len(lessThanAvg) == 0 {
+				print("catch")
+			}
+			lessThanAvgGid := lessThanAvg[i]
+			config.Shards[shard] = lessThanAvgGid
+			gid2Shards[lessThanAvgGid] = append(gid2Shards[lessThanAvgGid], shard)
+			if len(gid2Shards[lessThanAvgGid]) >= avg  && i + 1 < len(lessThanAvg){
+				i ++
+			}
 		}
 	}
 }
@@ -102,12 +238,16 @@ func (sm *ShardMaster) doJoin(servers map[int][]string) bool {
 	sm.copyConfig(&sm.configs[len(sm.configs)-1], &config)
 	config.Num ++
 
+	joinGids := make([]int, 0)
 	for key, value := range servers {
 		config.Groups[key] = value
+		joinGids = append(joinGids, key)
 	}
 
-	sm.reBalance(&config)
+	sm.joinBalance(&config, joinGids)
 	sm.configs = append(sm.configs, config)
+	raft.Log2("server.go: server %d doJoin over, len(config.Groups): %d, joinGids: %s, shards: %s\n",
+		sm.me, len(config.Groups), printGids(joinGids) , printShards(config.Shards))
 	return true
 }
 
@@ -116,12 +256,16 @@ func (sm *ShardMaster) doLeave(GIDs []int) bool {
 	sm.copyConfig(&sm.configs[len(sm.configs)-1], &config)
 	config.Num ++
 
+	leaveGids := make([]int, 0)
 	for _, gid := range GIDs {
 		delete(config.Groups, gid)
+		leaveGids = append(leaveGids, gid)
 	}
 
-	sm.reBalance(&config)
+	sm.leaveBalance(&config, leaveGids)
 	sm.configs = append(sm.configs, config)
+	raft.Log2("server.go: server %d doLeave over, len(config.Groups): %d, shards: %s\n",
+		sm.me, len(config.Groups), printShards(config.Shards))
 	return true
 }
 
@@ -133,10 +277,13 @@ func (sm *ShardMaster) doMove(shard int, gid int) bool {
 	config.Shards[shard] = gid
 
 	sm.configs = append(sm.configs, config)
+	raft.Log2("server.go: server %d doMove over, len(config.Groups): %d, shards: %s\n",
+		sm.me, len(config.Groups), printShards(config.Shards))
 	return true
 }
 
 func (sm *ShardMaster) doQuery(num int) Config {
+	raft.Log2("server.go: server %d doQuery, num: %d\n", sm.me, num)
 	latestConfig := sm.configs[len(sm.configs) - 1]
 	if num == -1 || num > latestConfig.Num {
 		return latestConfig
@@ -163,18 +310,13 @@ func (sm *ShardMaster) apply(op Op) ApplyReply {
 	executedReqId, _ := sm.executed[op.ClientId]
 	if op.ReqId > executedReqId {
 		if op.Operation == JOIN {
-			servers := op.Value1.(map[int][]string)
-			sm.doJoin(servers)
+			sm.doJoin(op.Servers)
 		} else if op.Operation == LEAVE {
-			GIDs := op.Value1.([]int)
-			sm.doLeave(GIDs)
+			sm.doLeave(op.GIDs)
 		} else if op.Operation == MOVE {
-			shard  := op.Value1.(int)
-			gid := op.Value2.(int)
-			sm.doMove(shard, gid)
+			sm.doMove(op.Shard, op.GID)
 		} else if op.Operation == QUERY {
-			num := op.Value1.(int)
-			config:= sm.doQuery(num)
+			config:= sm.doQuery(op.Num)
 			reply.result = config
 		}
 		sm.executed[op.ClientId] = op.ReqId
@@ -190,6 +332,7 @@ func (sm *ShardMaster) apply(op Op) ApplyReply {
 	//	" clientId %d, reqId: %d, err: %s\n", sm.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId, reply.err)
 	return reply
 }
+
 func printMap(servers map[int][]string) string {
 	s := ""
 
@@ -205,6 +348,23 @@ func printMap(servers map[int][]string) string {
 
 	return s
 }
+
+func printShards(shards [10]int) string {
+	s := ""
+	for _, gid := range shards {
+		s += strconv.Itoa(gid) + ", "
+	}
+
+	return s
+}
+func printGids(gids []int) string {
+	s := ""
+	for _, gid := range gids {
+		s += strconv.Itoa(gid) + ", "
+	}
+
+	return s
+}
 func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 	// Your code here.
 	_, isLeader := sm.rf.GetState()
@@ -212,17 +372,17 @@ func (sm *ShardMaster) Join(args *JoinArgs, reply *JoinReply) {
 		reply.WrongLeader = true
 		return
 	}
-	raft.Log2("server.go: Join, server: %s\n", printMap(args.Servers))
+	raft.Log2("server.go: server %d, Join, server: %s\n", sm.me, printMap(args.Servers))
 
 	reply.WrongLeader = false
 
-	op := Op{args.Servers, 0, args.Op, args.Id, args.ReqId}
+	op := Op{Operation: args.Op, ClientId: args.Id, ReqId: args.ReqId, Servers: args.Servers}
 
 	applyReply := sm.startAgree(op)
 
 	reply.Err = Err(applyReply.err)
 
-	raft.Log2("server.go: Join over, server: %s, err: %s\n", printMap(args.Servers), reply.Err)
+	raft.Log2("server.go: server %d, Join over, server: %s, err: %s\n", sm.me, printMap(args.Servers), reply.Err)
 	//raft.Log("server.go: server %d PutAppend over, {key: %s, value: %s, op: %s}, leader: %t, clientId: %d, err: %s \n",
 	//	kv.me, args.Key, kv.store[op.Key], args.Op, isLeader, args.Id, reply.Err)
 }
@@ -235,16 +395,16 @@ func (sm *ShardMaster) Leave(args *LeaveArgs, reply *LeaveReply) {
 		return
 	}
 
-	raft.Log2("server.go: Leave, gid: %d\n", args.GIDs)
+	raft.Log2("server.go: server %d Leave, gid: %d\n",sm.me, args.GIDs)
 
 	reply.WrongLeader = false
 
-	op := Op{args.GIDs, 0, args.Op, args.Id, args.ReqId}
+	op := Op{ Operation: args.Op, ClientId: args.Id, ReqId: args.ReqId, GIDs: args.GIDs}
 
 	applyReply := sm.startAgree(op)
 
 	reply.Err = Err(applyReply.err)
-	raft.Log2("server.go: Leave over, gid: %d, err: %s\n", args.GIDs, reply.Err)
+	raft.Log2("server.go: server %d Leave over, gid: %d, err: %s\n", sm.me, args.GIDs, reply.Err)
 }
 
 func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
@@ -255,15 +415,15 @@ func (sm *ShardMaster) Move(args *MoveArgs, reply *MoveReply) {
 		return
 	}
 
-	raft.Log2("server.go: Move, shard: %d, gid: %d\n", args.Shard, args.GID)
+	raft.Log2("server.go: server %d Move, shard: %d, gid: %d\n", sm.me, args.Shard, args.GID)
 	reply.WrongLeader = false
 
-	op := Op{args.Shard, args.GID, args.Op, args.Id, args.ReqId}
+	op := Op{ Operation: args.Op, ClientId: args.Id, ReqId: args.ReqId, Shard: args.Shard, GID: args.GID}
 
 	applyReply := sm.startAgree(op)
 
 	reply.Err = Err(applyReply.err)
-	raft.Log2("server.go: Move over, shard: %d, gid: %d, err: %s\n", args.Shard, args.GID, reply.Err)
+	raft.Log2("server.go: server %d Move over, shard: %d, gid: %d, err: %s\n",sm.me, args.Shard, args.GID, reply.Err)
 }
 
 func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
@@ -275,17 +435,17 @@ func (sm *ShardMaster) Query(args *QueryArgs, reply *QueryReply) {
 		return
 	}
 
-	raft.Log2("server.go: Query, Num: %d\n", args.Num)
+	raft.Log2("server.go: server %d Query, Num: %d\n", sm.me, args.Num)
 	reply.WrongLeader = false
 
-	op := Op{args.Num, 0, args.Op, args.Id, args.ReqId}
+	op := Op{ Operation: args.Op, ClientId: args.Id, ReqId: args.ReqId, Num: args.Num}
 
 	applyReply := sm.startAgree(op)
 	if applyReply.err == OK {
 		reply.Config = applyReply.result.(Config)
 	}
 	reply.Err = Err(applyReply.err)
-	raft.Log2("server.go: Query over, Num: %d, err: %s\n", args.Num, reply.Err)
+	raft.Log2("server.go: server %d Query over, Num: %d, err: %s\n", sm.me, args.Num, reply.Err)
 }
 
 //
@@ -335,30 +495,29 @@ func waitToAgree(sm *ShardMaster) {
 	for {
 		applyMsg := <-sm.applyCh
 
-		if applyMsg.UseSnapshot {
-			continue
-		}
+		if !applyMsg.UseSnapshot {
 
-		op := applyMsg.Command.(Op)
+			op := applyMsg.Command.(Op)
 
-		_, isLeader := sm.rf.GetState()
+			_, isLeader := sm.rf.GetState()
 
-		raft.Log2("server.go: server %d waitToAgree , op: %s, "+
-			"isLeader: %t, clientId: %d, reqId: %d\n", sm.me, op.Operation, isLeader, op.ClientId, op.ReqId)
+			raft.Log2("server.go: server %d waitToAgree , op: %s, "+
+				"isLeader: %t, clientId: %d, reqId: %d\n", sm.me, op.Operation, isLeader, op.ClientId, op.ReqId)
 
-		reply := sm.apply(op)
+			reply := sm.apply(op)
 
-		if isLeader {
-			sm.mu.Lock()
-			op, ok := sm.opChans[applyMsg.Index]
-			sm.mu.Unlock()
-			if ok {
-				op <- reply
+			if isLeader {
+				sm.mu.Lock()
+				op, ok := sm.opChans[applyMsg.Index]
+				sm.mu.Unlock()
+				if ok {
+					op <- reply
+				}
 			}
-		}
 
-		raft.Log2("server.go: server %d waitToAgree over, op: %s, "+
-			"isLeader: %t, clientId: %d, reqId: %d\n", sm.me, op.Operation, isLeader, op.ClientId, op.ReqId)
+			raft.Log2("server.go: server %d waitToAgree over, op: %s, "+
+				"isLeader: %t, clientId: %d, reqId: %d\n", sm.me, op.Operation, isLeader, op.ClientId, op.ReqId)
+		}
 	}
 
 }

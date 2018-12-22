@@ -81,155 +81,94 @@ func (sm *ShardMaster) copyConfig(source *Config, dest *Config) {
 	}
 }
 
-func (sm *ShardMaster) reBalance(config *Config, joinGids map[int]bool, leaveGids map[int]bool) {
-	NGroup := len(config.Groups)
-	avg := NShards / NGroup
-
-	gid2ShardsNum := make(map[int]int)
-	lessThanAvg := make([]int, 0)
-	moreThanAvg := make([]int, 0)
-	equalAvg := make([]int, 0)
-
-	for _, gid := range config.Shards {
-		if gid == 0 {
-			continue
-		}
-		gid2ShardsNum[gid] += 1
-	}
-
-	for gid := range joinGids {
-		gid2ShardsNum[gid] = 0
-	}
-
-	for gid, num := range gid2ShardsNum {
-		if num < avg {
-			lessThanAvg = append(lessThanAvg, gid)
-		} else if num > avg {
-			moreThanAvg = append(moreThanAvg, gid)
-		} else {
-			equalAvg = append(equalAvg, gid)
-		}
-	}
-
-
-	for i, gid := range config.Shards {
-		num, _ := gid2ShardsNum[gid]
-
-		if _, ok := leaveGids[gid]; ok || num > avg {
-			if len(lessThanAvg) > 0 {
-				lessThanAvgGid := lessThanAvg[0]
-				config.Shards[i] = lessThanAvgGid
-				gid2ShardsNum[gid] -= 1
-				gid2ShardsNum[lessThanAvgGid] += 1
-				if gid2ShardsNum[lessThanAvgGid] >= avg {
-					lessThanAvg = lessThanAvg[1:]
-				}
-			}
-		} else if num < avg {
-			if len(moreThanAvg) > 0 {
-				moreThanAvgGid := moreThanAvg[0]
-				config.Shards[i] = gid
-				gid2ShardsNum[moreThanAvgGid] -= 1
-				gid2ShardsNum[gid] +=1
-				if gid2ShardsNum[moreThanAvgGid] <= avg {
-					moreThanAvg = moreThanAvg[1:]
-				}
-			}
-		}
-	}
-}
-
-func (sm *ShardMaster) joinBalance(config *Config, joinGids []int) {
+func (sm *ShardMaster) reBalance(config *Config) {
 	NGroup := len(config.Groups)
 	avg := NShards / NGroup
 
 	gid2Shards := make(map[int][]int)
-	joinGid2ShardsNum := make(map[int]int)
-	moreThanAvg := make(map[int][]int)
+	joinGids := make([]int, 0)
+	leaveGids := make([]int, 0)
+	toMoveShards := make([]int, 0)
+	leaveShards := make([]int, 0)
+
+	var lastGroup int
 
 	for i, gid := range config.Shards {
 		gid2Shards[gid] = append(gid2Shards[gid], i)
 	}
 
+	for gid := range config.Groups {
+		_, ok := gid2Shards[gid]
+		if !ok {
+			joinGids = append(joinGids, gid)
+		}
+		lastGroup = gid
+	}
+
+	for gid := range gid2Shards {
+		_, ok:= config.Groups[gid]
+		if !ok {
+			leaveGids = append(leaveGids, gid)
+		}
+	}
+
+	for _, gid := range leaveGids {
+		leaveShards = append(leaveShards, gid2Shards[gid]...)
+		delete(gid2Shards, gid)
+	}
+
+	//if avg == 0 {
+	//	if len(leaveGids) > 0 {
+	//		for leaveGid := range leaveGids {
+	//			for i, gid := range config.Shards {
+	//				if leaveGid == gid {
+	//					config.Shards[i] = lastGroup
+	//				}
+	//			}
+	//		}
+	//	}
+	//	return
+	//}
+
 	for gid, shards := range gid2Shards {
-		if gid == 0 || len(shards) > avg {
-			moreThanAvg[gid] = shards
+		if len(shards) > avg {
+			toMoveShards = append(toMoveShards, shards[avg:]...)
+		} else if len(shards) < avg {
+			joinGids = append(joinGids, gid)
 		}
 	}
 
 	i := 0
-	dispatch := true
-	for gid, shards := range moreThanAvg {
-		split := avg
-		if gid == 0 {
-			split = 0
+	for _, shard := range leaveShards {
+		if i >= len(joinGids){
+			break
 		}
-		for shard := range shards[split: ]{
-			config.Shards[shard] = joinGids[i]
-			joinGid2ShardsNum[joinGids[i]] += 1
-			if joinGid2ShardsNum[joinGids[i]] >= avg  {
-				if i+1 >= len(joinGids) {
-					if gid != 0 {
-						dispatch = false
-						break
-					}
-				} else  {
-					i++
-				}
-			}
+		gid :=  joinGids[i]
+		if len(gid2Shards[gid]) >= avg {
+			break
 		}
-		if !dispatch {
+		config.Shards[shard] = gid
+		gid2Shards[gid] = append(gid2Shards[gid], shard)
+		if len(gid2Shards[gid]) >= avg {
+			i++
 			break
 		}
 	}
-}
 
-func (sm *ShardMaster) leaveBalance(config *Config, leaveGids []int) {
-	NGroup := len(config.Groups)
-	if NGroup == 0 {
-		for i := 0; i < len(config.Shards); i++{
-			config.Shards[i] = 0
+	for _, shard := range toMoveShards {
+
+		if i >= len(joinGids){
+			break
 		}
-		return
-	}
-	avg := NShards / NGroup
+		gid := joinGids[i]
 
-	gid2Shards := make(map[int][]int)
-	lessThanAvg := make([]int, 0)
-
-	for i, gid := range config.Shards {
-		gid2Shards[gid] = append(gid2Shards[gid], i)
-	}
-
-	for gid, shards := range gid2Shards {
-		isLeave := false
-		for _, leaveGid := range leaveGids {
-			if gid == leaveGid {
-				isLeave = true
-				break
-			}
+		if len(gid2Shards[gid]) >= avg {
+			break
 		}
 
-		if !isLeave && len(shards) < avg {
-			lessThanAvg = append(lessThanAvg, gid)
-		}
-	}
+		config.Shards[shard] = gid
+		gid2Shards[gid] = append(gid2Shards[gid], shard)
 
-	i := 0
-	for _, gid := range leaveGids {
-		shards := gid2Shards[gid]
-		for _, shard := range shards {
-
-			if len(lessThanAvg) == 0 {
-				print("catch")
-			}
-			lessThanAvgGid := lessThanAvg[i]
-			config.Shards[shard] = lessThanAvgGid
-			gid2Shards[lessThanAvgGid] = append(gid2Shards[lessThanAvgGid], shard)
-			if len(gid2Shards[lessThanAvgGid]) >= avg  && i + 1 < len(lessThanAvg){
-				i ++
-			}
-		}
 	}
 }
 
@@ -244,7 +183,10 @@ func (sm *ShardMaster) doJoin(servers map[int][]string) bool {
 		joinGids = append(joinGids, key)
 	}
 
-	sm.joinBalance(&config, joinGids)
+	if joinGids[0] == 504 {
+		print("catch")
+	}
+	sm.reBalance(&config)
 	sm.configs = append(sm.configs, config)
 	raft.Log2("server.go: server %d doJoin over, len(config.Groups): %d, joinGids: %s, shards: %s\n",
 		sm.me, len(config.Groups), printGids(joinGids) , printShards(config.Shards))
@@ -262,10 +204,13 @@ func (sm *ShardMaster) doLeave(GIDs []int) bool {
 		leaveGids = append(leaveGids, gid)
 	}
 
-	sm.leaveBalance(&config, leaveGids)
+	if leaveGids[0] == 1002 {
+		print("catch")
+	}
+	sm.reBalance(&config)
 	sm.configs = append(sm.configs, config)
-	raft.Log2("server.go: server %d doLeave over, len(config.Groups): %d, shards: %s\n",
-		sm.me, len(config.Groups), printShards(config.Shards))
+	raft.Log2("server.go: server %d doLeave over, len(config.Groups): %d, leaveGids: %s, shards: %s\n",
+		sm.me, len(config.Groups), printGids(leaveGids), printShards(config.Shards))
 	return true
 }
 

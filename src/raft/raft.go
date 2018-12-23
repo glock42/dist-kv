@@ -649,9 +649,7 @@ func broadcastAppendEntries(rf *Raft) {
 
                 appendEntriesArgs.PrevLogIndex = nextIndex - 1
                 appendEntriesArgs.PrevLogTerm = rf.logs[rf.getLogsIdx(appendEntriesArgs.PrevLogIndex)].Term
-                if appendEntriesArgs.PrevLogIndex ==2 && appendEntriesArgs.IsHeartbeat == false{
-                    print("catch it")
-                }
+
                 if !appendEntriesArgs.IsHeartbeat {
                     Log2("raft.go: server %d broadcastAppendEntries to %d, nextIndex: %d, PrevLogIndex: %d, commitIndex: %d " +
                         "rf.base: %d, len(rf.logs): %d, rf.status: %d, prevLog Term: %d\n" ,

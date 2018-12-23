@@ -85,13 +85,15 @@ func (sm *ShardMaster) reBalance(config *Config) {
 	NGroup := len(config.Groups)
 	avg := NShards / NGroup
 
+	if avg == 0 {
+		return
+	}
 	gid2Shards := make(map[int][]int)
 	joinGids := make([]int, 0)
 	leaveGids := make([]int, 0)
 	toMoveShards := make([]int, 0)
 	leaveShards := make([]int, 0)
 
-	var lastGroup int
 
 	for i, gid := range config.Shards {
 		gid2Shards[gid] = append(gid2Shards[gid], i)
@@ -102,7 +104,6 @@ func (sm *ShardMaster) reBalance(config *Config) {
 		if !ok {
 			joinGids = append(joinGids, gid)
 		}
-		lastGroup = gid
 	}
 
 	for gid := range gid2Shards {
@@ -117,19 +118,6 @@ func (sm *ShardMaster) reBalance(config *Config) {
 		delete(gid2Shards, gid)
 	}
 
-	//if avg == 0 {
-	//	if len(leaveGids) > 0 {
-	//		for leaveGid := range leaveGids {
-	//			for i, gid := range config.Shards {
-	//				if leaveGid == gid {
-	//					config.Shards[i] = lastGroup
-	//				}
-	//			}
-	//		}
-	//	}
-	//	return
-	//}
-
 	for gid, shards := range gid2Shards {
 		if len(shards) > avg {
 			toMoveShards = append(toMoveShards, shards[avg:]...)
@@ -139,31 +127,32 @@ func (sm *ShardMaster) reBalance(config *Config) {
 	}
 
 	i := 0
-	for _, shard := range leaveShards {
-		if i >= len(joinGids){
-			break
-		}
-		gid :=  joinGids[i]
-		if len(gid2Shards[gid]) >= avg {
-			break
+	for j:=0 ;j < len(leaveShards); j++{
+		shard := leaveShards[j]
+		gid := joinGids[i]
+		if len(gid2Shards[gid]) >= avg && i != len(joinGids) - 1{
+			i++
+			j--
+			continue
 		}
 		config.Shards[shard] = gid
 		gid2Shards[gid] = append(gid2Shards[gid], shard)
-		if len(gid2Shards[gid]) >= avg {
-			i++
-			break
-		}
 	}
 
-	for _, shard := range toMoveShards {
+	for j:=0 ;j < len(toMoveShards); j++{
+
+		shard := toMoveShards[j]
 
 		if i >= len(joinGids){
 			break
 		}
+
 		gid := joinGids[i]
 
 		if len(gid2Shards[gid]) >= avg {
-			break
+			i++
+			j--
+			continue
 		}
 
 		config.Shards[shard] = gid
@@ -183,9 +172,6 @@ func (sm *ShardMaster) doJoin(servers map[int][]string) bool {
 		joinGids = append(joinGids, key)
 	}
 
-	if joinGids[0] == 504 {
-		print("catch")
-	}
 	sm.reBalance(&config)
 	sm.configs = append(sm.configs, config)
 	raft.Log2("server.go: server %d doJoin over, len(config.Groups): %d, joinGids: %s, shards: %s\n",
@@ -204,9 +190,6 @@ func (sm *ShardMaster) doLeave(GIDs []int) bool {
 		leaveGids = append(leaveGids, gid)
 	}
 
-	if leaveGids[0] == 1002 {
-		print("catch")
-	}
 	sm.reBalance(&config)
 	sm.configs = append(sm.configs, config)
 	raft.Log2("server.go: server %d doLeave over, len(config.Groups): %d, leaveGids: %s, shards: %s\n",

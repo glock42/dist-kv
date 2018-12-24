@@ -11,8 +11,10 @@ package shardkv
 
 const (
 	OK            = "OK"
+	ERROR         = "ERROR"
 	ErrNoKey      = "ErrNoKey"
 	ErrWrongGroup = "ErrWrongGroup"
+	ErrDupReq     = "ErrDupReq"
 )
 
 type Err string
@@ -26,6 +28,8 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Id  int64
+	ReqId  int64
 }
 
 type PutAppendReply struct {
@@ -35,6 +39,9 @@ type PutAppendReply struct {
 
 type GetArgs struct {
 	Key string
+	Id  int64
+	ReqId  int64
+
 	// You'll have to add definitions here.
 }
 

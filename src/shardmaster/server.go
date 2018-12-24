@@ -413,6 +413,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister)
 	sm.opChans = make(map[int]chan ApplyReply)
 	sm.executed = make(map[int64]int64)
 
+	raft.Log3("start shardKV server %d \n", me)
+
 	go waitToAgree(sm)
 
 	return sm

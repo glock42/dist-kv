@@ -113,6 +113,7 @@ func (kv *ShardKV) apply(op Op) ApplyReply {
 	if op.ReqId > executedReqId {
 		shard := key2shard(op.Key)
 		if _, ok := kv.ownShards[shard]; ok {
+			raft.Log3("server.go, server %d apply, own shard: %d\n", kv.me, shard)
 			if op.Operation == GET {
 				v, ok := kv.store[op.Key]
 				if ok {
@@ -132,6 +133,7 @@ func (kv *ShardKV) apply(op Op) ApplyReply {
 			}
 			kv.executed[op.ClientId] = op.ReqId
 		} else {
+			raft.Log3("server.go, server %d apply, want shard: %d, ErrWrongGroup\n", kv.me, shard)
 			reply.err = ErrWrongGroup
 		}
 	} else {
@@ -224,21 +226,22 @@ func (kv *ShardKV) doPoll() {
 		return
 	}
 	newConfig := kv.shardMaster.Query(-1)
-
 	if newConfig.Num > kv.config.Num {
+		raft.Log3("server.go: server %d doPoll, poll the newConfig, num: %d\n", kv.me, newConfig.Num)
 		kv.rf.Start(newConfig)
 	}
 }
 
 func (kv *ShardKV) applyNewConfig(newConfig *shardmaster.Config) {
 
-	oldOwnShards := kv.ownShards
+	raft.Log3("server.go: server %d applyNewConfig, num: %d\n", kv.me, newConfig.Num)
+	oldOwnShards :=  kv.ownShards
 
 	kv.ownShards = make(map[int]bool)
 
 	for shard, gid := range newConfig.Shards {
 		if gid == kv.gid {
-			if _, ok := oldOwnShards[shard]; ok {
+			if _, ok := oldOwnShards[shard]; ok || kv.config.Num == 0 {
 				kv.ownShards[shard] = true
 				delete(oldOwnShards, shard)
 			} else {
@@ -266,9 +269,14 @@ func (kv *ShardKV) applyNewConfig(newConfig *shardmaster.Config) {
 
 	kv.configLog[kv.config.Num] = kv.config.Copy()
 	kv.config = newConfig.Copy()
+	raft.Log3("server.go: applyNewConfig over, num: %d\n", newConfig.Num)
 }
 
 func (kv *ShardKV) doPull() {
+	_, isLeader := kv.rf.GetState()
+	if !isLeader {
+		return
+	}
 
 	for shard, configNum := range kv.needToPullShards {
 		migrationArg := MigrationArg{}
@@ -282,7 +290,7 @@ func (kv *ShardKV) doPull() {
 				srv := kv.make_end(servers[si])
 
 				var reply MigrationReply
-
+                raft.Log3("server.go: server %d doPull, call server %s migration\n", kv.me, servers[si])
 				ok := srv.Call("ShardKV.Migration", &migrationArg, &reply)
 
 				if ok && reply.Err == OK {
@@ -328,6 +336,10 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	// call gob.Register on structures you want
 	// Go's RPC library to marshall/unmarshall.
 	gob.Register(Op{})
+	gob.Register(MigrationData{})
+	gob.Register(MigrationArg{})
+	gob.Register(MigrationReply{})
+	gob.Register(shardmaster.Config{})
 
 	kv := new(ShardKV)
 	kv.me = me
@@ -363,11 +375,8 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 }
 
 func pollAndPull(kv *ShardKV) {
-	_, isLeader := kv.rf.GetState()
-	if !isLeader {
-		return
-	}
 	for {
+
 		select {
 		case <-time.After(100 * time.Millisecond):
 			kv.doPoll()

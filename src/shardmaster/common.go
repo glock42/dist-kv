@@ -31,6 +31,14 @@ type Config struct {
 	Groups map[int][]string // gid -> servers[]
 }
 
+func (config Config) Copy() Config {
+	newConfig := Config{Num: config.Num, Shards: config.Shards, Groups: make(map[int][]string)}
+	for gid, servers := range config.Groups {
+		newConfig.Groups[gid] = append([]string{}, servers...)
+	}
+	return newConfig
+}
+
 const (
 	OK = "OK"
 	ERROR = "ERROR"

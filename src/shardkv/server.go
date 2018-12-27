@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"labrpc"
 	"shardmaster"
+	"strconv"
 	"time"
 )
 import "raft"
@@ -113,7 +114,7 @@ func (kv *ShardKV) apply(op Op) ApplyReply {
 	if op.ReqId > executedReqId {
 		shard := key2shard(op.Key)
 		if _, ok := kv.ownShards[shard]; ok {
-			raft.Log3("server.go, server %d apply, own shard: %d\n", kv.me, shard)
+			//raft.Log3("server.go, server %d apply, own shard: %d\n", kv.me, shard)
 			if op.Operation == GET {
 				v, ok := kv.store[op.Key]
 				if ok {
@@ -133,7 +134,8 @@ func (kv *ShardKV) apply(op Op) ApplyReply {
 			}
 			kv.executed[op.ClientId] = op.ReqId
 		} else {
-			raft.Log3("server.go, server %d apply, want shard: %d, ErrWrongGroup\n", kv.me, shard)
+			raft.Log3("server.go, server: %d, gid: %d apply, want shard: %d, owned shards: %s, ErrWrongGroup\n",
+				kv.me, kv.gid, shard, printShards(kv.ownShards))
 			reply.err = ErrWrongGroup
 		}
 	} else {
@@ -204,6 +206,7 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 func (kv *ShardKV) Kill() {
 	kv.rf.Kill()
 	// Your code here, if desired.
+	raft.Log3("kill shardKV server: %d, gid: %d\n", kv.me, kv.gid)
 }
 
 func (kv *ShardKV) Migration(arg MigrationArg, reply MigrationReply) {
@@ -225,16 +228,42 @@ func (kv *ShardKV) doPoll() {
 	if !isLeader {
 		return
 	}
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
 	newConfig := kv.shardMaster.Query(-1)
 	if newConfig.Num > kv.config.Num {
-		raft.Log3("server.go: server %d doPoll, poll the newConfig, num: %d\n", kv.me, newConfig.Num)
+		raft.Log3("server.go: server: %d, gid: %d, doPoll, poll the newConfig, num: %d\n", kv.me, kv.gid, newConfig.Num)
 		kv.rf.Start(newConfig)
 	}
 }
 
+func printShards(shards map[int]bool) string {
+	s := ""
+	for k := range shards{
+		s += strconv.Itoa(k) + ", "
+	}
+
+	if len(s) > 0 {
+		s = s[0 : len(s) - 2]
+	}
+
+	return s
+}
 func (kv *ShardKV) applyNewConfig(newConfig *shardmaster.Config) {
 
-	raft.Log3("server.go: server %d applyNewConfig, num: %d\n", kv.me, newConfig.Num)
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if newConfig.Num <= kv.config.Num {
+		return
+	}
+
+	raft.Log3("server.go: server: %d, gid: %d, applyNewConfig, num: %d\n", kv.me, kv.gid, newConfig.Num)
+
+	if newConfig.Num == 1 {
+		raft.Log3("catch it")
+	}
+
 	oldOwnShards :=  kv.ownShards
 
 	kv.ownShards = make(map[int]bool)
@@ -269,7 +298,8 @@ func (kv *ShardKV) applyNewConfig(newConfig *shardmaster.Config) {
 
 	kv.configLog[kv.config.Num] = kv.config.Copy()
 	kv.config = newConfig.Copy()
-	raft.Log3("server.go: applyNewConfig over, num: %d\n", newConfig.Num)
+	raft.Log3("server.go: server: %d, gid: %d, applyNewConfig over, num: %d, owned shards: %s \n",
+		kv.me, kv.gid, newConfig.Num, printShards(kv.ownShards))
 }
 
 func (kv *ShardKV) doPull() {
@@ -290,7 +320,7 @@ func (kv *ShardKV) doPull() {
 				srv := kv.make_end(servers[si])
 
 				var reply MigrationReply
-                raft.Log3("server.go: server %d doPull, call server %s migration\n", kv.me, servers[si])
+                raft.Log3("server.go: server: %d, gid: %d doPull, call server %s migration\n", kv.me, kv.gid, servers[si])
 				ok := srv.Call("ShardKV.Migration", &migrationArg, &reply)
 
 				if ok && reply.Err == OK {
@@ -348,7 +378,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.gid = gid
 	kv.masters = masters
 	kv.shardMaster = shardmaster.MakeClerk(masters)
-	kv.config = kv.shardMaster.Query(-1)
+	kv.config = shardmaster.Config{}
 
 	// Your initialization code here.
 
@@ -367,7 +397,7 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.needToDispatchShards = make(map[int]map[int]MigrationData)
 	kv.configLog = make(map[int]shardmaster.Config)
 
-	raft.Log3("start shardKV server %d, gid: %d \n", gid, me)
+	raft.Log3("start shardKV server %d, gid: %d \n", kv.me, gid)
 	go waitToAgree(kv)
 	go pollAndPull(kv)
 

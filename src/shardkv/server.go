@@ -15,8 +15,8 @@ import "encoding/gob"
 
 const (
 	GET = "GET"
-	PUT = "PUT"
-	APPEND = "APPEND"
+	PUT = "Put"
+	APPEND = "Append"
 )
 
 type Op struct {
@@ -46,8 +46,9 @@ type MigrationData struct {
 }
 
 type MigrationReply struct {
-	Data MigrationData
-	Err
+	Data        MigrationData
+	Shard       int
+	Err         Err
 }
 
 type ShardKV struct {
@@ -114,7 +115,6 @@ func (kv *ShardKV) apply(op Op) ApplyReply {
 	if op.ReqId > executedReqId {
 		shard := key2shard(op.Key)
 		if _, ok := kv.ownShards[shard]; ok {
-			//raft.Log3("server.go, server %d apply, own shard: %d\n", kv.me, shard)
 			if op.Operation == GET {
 				v, ok := kv.store[op.Key]
 				if ok {
@@ -129,12 +129,14 @@ func (kv *ShardKV) apply(op Op) ApplyReply {
 				} else {
 					reply.err = ErrNoKey
 				}
-			} else {
+			} else if op.Operation == PUT {
 				kv.store[op.Key] = op.Value
 			}
 			kv.executed[op.ClientId] = op.ReqId
+			raft.Log3("server.go, server: %d, gid: %d, apply %s, {key: %s, value: %s, reply: %s, err: %s}, key2shard: %d, owned shards: %s\n",
+				kv.me, kv.gid, op.Operation, op.Key, op.Value, kv.store[op.Key], reply.err, shard, printShards(kv.ownShards))
 		} else {
-			raft.Log3("server.go, server: %d, gid: %d apply, want shard: %d, owned shards: %s, ErrWrongGroup\n",
+			raft.Log3("server.go, server: %d, gid: %d, apply, want shard: %d, owned shards: %s, ErrWrongGroup\n",
 				kv.me, kv.gid, shard, printShards(kv.ownShards))
 			reply.err = ErrWrongGroup
 		}
@@ -151,8 +153,22 @@ func (kv *ShardKV) apply(op Op) ApplyReply {
 	return reply
 }
 
+func (kv *ShardKV)checkConfigNum(num int) bool {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+	if kv.config.Num != num {
+		return false
+	}
+	return true
+}
+
 func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+
+	if !kv.checkConfigNum(args.ConfigNum) {
+		reply.Err = ErrWrongGroup
+		return
+	}
 	_, isLeader := kv.rf.GetState()
 	if !isLeader {
 		reply.WrongLeader = true
@@ -178,11 +194,19 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+
+	if !kv.checkConfigNum(args.ConfigNum) {
+		reply.Err = ErrWrongGroup
+		return
+	}
+
 	_, isLeader := kv.rf.GetState()
+
 	if !isLeader {
 		reply.WrongLeader = true
 		return
 	}
+
 	//raft.Log3("server.go: server %d PutAppend, {key: %s, value: %s, op: %s}, clientId: %d\n",
 	//	kv.me, args.Key, args.Value, args.Op, args.Id)
 	reply.WrongLeader = false
@@ -209,29 +233,41 @@ func (kv *ShardKV) Kill() {
 	raft.Log3("kill shardKV server: %d, gid: %d\n", kv.me, kv.gid)
 }
 
-func (kv *ShardKV) Migration(arg MigrationArg, reply MigrationReply) {
+func (kv *ShardKV) Migration(arg *MigrationArg, reply *MigrationReply) {
 
-	if arg.ConfigNum >= kv.config.Num {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
+	if arg.ConfigNum >= kv.config.Num || len(kv.needToDispatchShards)  <=0 {
 		reply.Err = ErrWrongGroup
+		return
 	}
 
+	raft.Log3("server.go: server: %d, gid: %d Migration, shard: %d\n", kv.me, kv.gid, arg.Shard)
+
 	reply.Err = OK
+	reply.Shard = arg.Shard
 	reply.Data = MigrationData{}
 	reply.Data.Store = make(map[string]string)
 	for k, v := range kv.needToDispatchShards[arg.ConfigNum][arg.Shard].Store {
+		if k == "0"  {
+			raft.Log3("server.go: server: %d, gid: %d, Migration key: %s, value: %s\n", kv.me, kv.gid, k, v)
+		}
 		reply.Data.Store[k] = v
 	}
 }
 
 func (kv *ShardKV) doPoll() {
-	_, isLeader := kv.rf.GetState()
-	if !isLeader {
-		return
-	}
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
-	newConfig := kv.shardMaster.Query(-1)
-	if newConfig.Num > kv.config.Num {
+
+	_, isLeader := kv.rf.GetState()
+	if !isLeader || len(kv.needToPullShards) > 0 {
+		return
+	}
+
+	newConfig := kv.shardMaster.Query(kv.config.Num + 1)
+	if newConfig.Num == kv.config.Num + 1 {
 		raft.Log3("server.go: server: %d, gid: %d, doPoll, poll the newConfig, num: %d\n", kv.me, kv.gid, newConfig.Num)
 		kv.rf.Start(newConfig)
 	}
@@ -240,6 +276,19 @@ func (kv *ShardKV) doPoll() {
 func printShards(shards map[int]bool) string {
 	s := ""
 	for k := range shards{
+		s += strconv.Itoa(k) + ", "
+	}
+
+	if len(s) > 0 {
+		s = s[0 : len(s) - 2]
+	}
+
+	return s
+}
+
+func printConfigShards(shards [10]int) string {
+	s := ""
+	for _, k := range shards{
 		s += strconv.Itoa(k) + ", "
 	}
 
@@ -258,11 +307,9 @@ func (kv *ShardKV) applyNewConfig(newConfig *shardmaster.Config) {
 		return
 	}
 
-	raft.Log3("server.go: server: %d, gid: %d, applyNewConfig, num: %d\n", kv.me, kv.gid, newConfig.Num)
+	raft.Log3("server.go: server: %d, gid: %d, applyNewConfig, config_shards: %s, num: %d\n",
+		kv.me, kv.gid, printConfigShards(newConfig.Shards) , newConfig.Num)
 
-	if newConfig.Num == 1 {
-		raft.Log3("catch it")
-	}
 
 	oldOwnShards :=  kv.ownShards
 
@@ -274,7 +321,7 @@ func (kv *ShardKV) applyNewConfig(newConfig *shardmaster.Config) {
 				kv.ownShards[shard] = true
 				delete(oldOwnShards, shard)
 			} else {
-				kv.needToPullShards[shard] = newConfig.Num
+				kv.needToPullShards[shard] = kv.config.Num
 			}
 		}
 
@@ -296,17 +343,38 @@ func (kv *ShardKV) applyNewConfig(newConfig *shardmaster.Config) {
 		kv.needToDispatchShards[kv.config.Num] = shard2Data
 	}
 
-	kv.configLog[kv.config.Num] = kv.config.Copy()
 	kv.config = newConfig.Copy()
-	raft.Log3("server.go: server: %d, gid: %d, applyNewConfig over, num: %d, owned shards: %s \n",
-		kv.me, kv.gid, newConfig.Num, printShards(kv.ownShards))
+	kv.configLog[kv.config.Num] = kv.config.Copy()
+	if len(kv.needToPullShards) > 0 {
+		raft.Log3("server.go: server: %d, gid: %d, " +
+			"applyNewConfig over, num: %d, owned shards: %s, but need to pull \n",
+			kv.me, kv.gid, newConfig.Num, printShards(kv.ownShards))
+	} else {
+		raft.Log3("server.go: server: %d, gid: %d, applyNewConfig over, num: %d, owned shards: %s \n",
+			kv.me, kv.gid, newConfig.Num, printShards(kv.ownShards))
+	}
+
 }
 
 func (kv *ShardKV) doPull() {
+	kv.mu.Lock()
+	defer kv.mu.Unlock()
+
 	_, isLeader := kv.rf.GetState()
+
 	if !isLeader {
 		return
 	}
+
+	if len(kv.needToPullShards) <= 0 {
+		return
+	}
+
+	raft.Log3("server.go: server: %d, gid: %d, numOfShards: %d doPull\n", kv.me, kv.gid, len(kv.needToPullShards))
+	defer raft.Log3("server.go: server: %d, gid: %d, numOfShards: %d, doPull over\n", kv.me, kv.gid, len(kv.needToPullShards))
+
+	ch := make(chan int)
+	count := len(kv.needToPullShards)
 
 	for shard, configNum := range kv.needToPullShards {
 		migrationArg := MigrationArg{}
@@ -315,22 +383,31 @@ func (kv *ShardKV) doPull() {
 
 		gid := kv.configLog[configNum].Shards[shard]
 
-		if servers, ok := kv.configLog[configNum].Groups[gid]; ok {
-			for si := 0; si < len(servers); si++ {
-				srv := kv.make_end(servers[si])
+		go func(cfg shardmaster.Config) {
+			if servers, ok := cfg.Groups[gid]; ok {
+				for si := 0; si < len(servers); si++ {
+					srv := kv.make_end(servers[si])
 
-				var reply MigrationReply
-                raft.Log3("server.go: server: %d, gid: %d doPull, call server %s migration\n", kv.me, kv.gid, servers[si])
-				ok := srv.Call("ShardKV.Migration", &migrationArg, &reply)
+					var reply MigrationReply
+					//raft.Log3("server.go: server: %d, gid: %d doPull, call server %s migration\n", kv.me, kv.gid, servers[si])
+					ok := srv.Call("ShardKV.Migration", &migrationArg, &reply)
 
-				if ok && reply.Err == OK {
-					kv.rf.Start(reply)
-					return
+					if ok && reply.Err == OK {
+						raft.Log3("server.go: server: %d, gid: %d doPull OK, call server %s migration back\n", kv.me, kv.gid, servers[si])
+						kv.rf.Start(reply)
+						ch <- 0
+						break
+					}
 				}
 			}
-		}
+			ch <- 0
+		}(kv.configLog[configNum].Copy())
 	}
 
+	for count > 0  {
+		<- ch
+		count--
+	}
 }
 
 
@@ -396,22 +473,30 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.needToPullShards = make(map[int]int)
 	kv.needToDispatchShards = make(map[int]map[int]MigrationData)
 	kv.configLog = make(map[int]shardmaster.Config)
+	kv.configLog[kv.config.Num] = kv.config.Copy()
 
 	raft.Log3("start shardKV server %d, gid: %d \n", kv.me, gid)
 	go waitToAgree(kv)
-	go pollAndPull(kv)
+	go poll(kv)
+	go pull(kv)
 
 	return kv
 }
 
-func pollAndPull(kv *ShardKV) {
+func pull(kv *ShardKV) {
 	for {
+		select {
+		case <-time.After(150 * time.Millisecond):
+			kv.doPull()
+		}
+	}
+}
 
+func poll(kv *ShardKV) {
+	for {
 		select {
 		case <-time.After(100 * time.Millisecond):
 			kv.doPoll()
-		case <-time.After(150 * time.Millisecond):
-			kv.doPull()
 		}
 	}
 }
@@ -468,9 +553,19 @@ func waitToAgree(kv *ShardKV) {
 				raft.Log("server.go: server %d waitToAgree over, op: {key: %s, value: %s, op: %s}, "+
 					"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
 			} else if reply, ok := applyMsg.Command.(MigrationReply); ok{
+				kv.mu.Lock()
+				delete(kv.needToPullShards, reply.Shard)
+				kv.ownShards[reply.Shard] = true
+
 				for k, v := range reply.Data.Store {
+					if k == "0" {
+						raft.Log3("server.go: server: %d, gid: %d, apply MigrationReply key: %s, value: %s\n", kv.me, kv.gid, k, v)
+					}
 					kv.store[k] = v
 				}
+				raft.Log3("server.go: server: %d, gid: %d migrationReply, ownShards:%s\n",
+					kv.me, kv.gid, printShards(kv.ownShards))
+				kv.mu.Unlock()
 			} else {
 				newConfig := applyMsg.Command.(shardmaster.Config)
 				kv.applyNewConfig(&newConfig)

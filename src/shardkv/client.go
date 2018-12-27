@@ -64,6 +64,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	// You'll have to add code here.
 	ck.id = nrand()
 	ck.reqId = 1
+	ck.config = ck.sm.Query(-1)
 	return ck
 }
 
@@ -90,6 +91,7 @@ func (ck *Clerk) Get(key string) string {
 		args.Key = key
 		args.ReqId = reqId
 		args.Id  = ck.id
+		args.ConfigNum = ck.config.Num
 
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
@@ -133,6 +135,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		args.Op = op
 		args.ReqId = reqId
 		args.Id = ck.id
+		args.ConfigNum = ck.config.Num
 
 		shard := key2shard(key)
 		gid := ck.config.Shards[shard]
@@ -157,8 +160,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 }
 
 func (ck *Clerk) Put(key string, value string) {
-	ck.PutAppend(key, value, "Put")
+	ck.PutAppend(key, value, PUT)
 }
 func (ck *Clerk) Append(key string, value string) {
-	ck.PutAppend(key, value, "Append")
+	ck.PutAppend(key, value, APPEND)
 }

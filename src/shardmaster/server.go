@@ -213,7 +213,7 @@ func (sm *ShardMaster) doMove(shard int, gid int) bool {
 func (sm *ShardMaster) doQuery(num int) Config {
 	raft.Log2("server.go: server %d doQuery, num: %d\n", sm.me, num)
 	latestConfig := sm.configs[len(sm.configs) - 1]
-	if num == -1 || num > latestConfig.Num {
+	if num == -1 || num >= latestConfig.Num {
 		return latestConfig
 	}
 

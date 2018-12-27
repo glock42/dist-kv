@@ -30,6 +30,7 @@ type PutAppendArgs struct {
 	// otherwise RPC will break.
 	Id  int64
 	ReqId  int64
+	ConfigNum int
 }
 
 type PutAppendReply struct {
@@ -41,7 +42,7 @@ type GetArgs struct {
 	Key string
 	Id  int64
 	ReqId  int64
-
+	ConfigNum int
 	// You'll have to add definitions here.
 }
 

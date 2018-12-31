@@ -1,6 +1,5 @@
 package shardkv
 
-
 // import "shardmaster"
 import (
 	"bytes"
@@ -14,8 +13,8 @@ import "sync"
 import "encoding/gob"
 
 const (
-	GET = "GET"
-	PUT = "Put"
+	GET    = "GET"
+	PUT    = "Put"
 	APPEND = "Append"
 )
 
@@ -28,8 +27,8 @@ type Op struct {
 	Operation string
 	ClientId  int64
 	ReqId     int64
+	ConfigNum int
 }
-
 
 type ApplyReply struct {
 	value string
@@ -43,12 +42,14 @@ type MigrationArg struct {
 
 type MigrationData struct {
 	Store       map[string]string
+	Executed    map[int64]int64
 }
 
 type MigrationReply struct {
-	Data        MigrationData
-	Shard       int
-	Err         Err
+	Data      MigrationData
+	Shard     int
+	ConfigNum int
+	Err       Err
 }
 
 type ShardKV struct {
@@ -68,34 +69,48 @@ type ShardKV struct {
 	shardMaster *shardmaster.Clerk
 	config      shardmaster.Config
 
-	ownShards   map[int]bool
-	needToPullShards map[int]int
+	ownShards            map[int]bool
+	needToPullShards     map[int]int
 	needToDispatchShards map[int]map[int]MigrationData
-	configLog	map[int]shardmaster.Config
+	configLog            map[int]shardmaster.Config
 }
 
-func (kv *ShardKV) startAgree(op Op) ApplyReply {
+func (kv *ShardKV) startAgree(configNum int, op interface{}) ApplyReply {
 
 	//raft.Log("server.go: server %d startAgree, op: {key: %s, value: %s, op: %s}," +
 	//	" clientId %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId)
 
-	index, term, _ := kv.rf.Start(op)
 	kv.mu.Lock()
+	if configNum != kv.config.Num {
+		kv.mu.Unlock()
+		return ApplyReply{value:"", err:ErrWrongGroup}
+	}
+
+	index, term, _ := kv.rf.Start(op)
 	opChan, ok := kv.opChans[index]
 	if !ok {
 		kv.opChans[index] = make(chan ApplyReply, 1)
-		opChan= kv.opChans[index]
+		opChan = kv.opChans[index]
 	}
+	raft.Log3("server.go, server: %d, gid: %d, startAgree, wait index: %d", kv.me, kv.gid, index)
 	kv.mu.Unlock()
 	reply := ApplyReply{}
 	select {
-	case reply = <- opChan:
-		curTerm, isLeader := kv.rf.GetState()
-		if !isLeader || term != curTerm {
+	case reply = <-opChan:
+		curTerm, _ := kv.rf.GetState()
+		if term != curTerm {
 			reply.value = ""
 			reply.err = ERROR
+			raft.Log3("server.go: server: %d, gid: %d, startAgree over, ERROR: different leader",
+				kv.me, kv.gid)
+		} else {
+			raft.Log3("server.go: server: %d, gid: %d, startAgree over, index: %d",
+				kv.me, kv.gid, index)
 		}
-	case <-time.After(1000 * time.Millisecond):
+	case <-time.After(time.Duration(3 * time.Second)):
+		raft.Log3("server.go: server: %d, gid: %d, startAgree over, index: %d, ERROR: wait time out",
+			kv.me, kv.gid, index)
+
 		reply.err = ERROR
 	}
 	//raft.Log("server.go: server %d startAgree over, op: {key: %s, value: %s, op: %s}," +
@@ -106,15 +121,13 @@ func (kv *ShardKV) startAgree(op Op) ApplyReply {
 func (kv *ShardKV) apply(op Op) ApplyReply {
 	//raft.Log3("server.go: server %d apply, op: {key: %s, value: %s, op: %s}," +
 	//	" clientId %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId)
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	reply := ApplyReply{}
 	reply.err = OK
 	reply.value = ""
 	executedReqId, _ := kv.executed[op.ClientId]
 	if op.ReqId > executedReqId {
 		shard := key2shard(op.Key)
-		if _, ok := kv.ownShards[shard]; ok {
+		if _, ok := kv.ownShards[shard]; ok && op.ConfigNum == kv.config.Num {
 			if op.Operation == GET {
 				v, ok := kv.store[op.Key]
 				if ok {
@@ -153,7 +166,7 @@ func (kv *ShardKV) apply(op Op) ApplyReply {
 	return reply
 }
 
-func (kv *ShardKV)checkConfigNum(num int) bool {
+func (kv *ShardKV) checkConfigNum(num int) bool {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 	if kv.config.Num != num {
@@ -180,9 +193,9 @@ func (kv *ShardKV) Get(args *GetArgs, reply *GetReply) {
 
 	reply.WrongLeader = false
 
-	op := Op{args.Key, "", GET, args.Id, args.ReqId}
+	op := Op{args.Key, "", GET, args.Id, args.ReqId, args.ConfigNum}
 
-	applyReply := kv.startAgree(op)
+	applyReply := kv.startAgree(args.ConfigNum, op)
 
 	reply.Value = applyReply.value
 	reply.Err = Err(applyReply.err)
@@ -207,18 +220,19 @@ func (kv *ShardKV) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		return
 	}
 
-	//raft.Log3("server.go: server %d PutAppend, {key: %s, value: %s, op: %s}, clientId: %d\n",
-	//	kv.me, args.Key, args.Value, args.Op, args.Id)
+	raft.Log3("server.go: server: %d, gid: %d, PutAppend, {key: %s, value: %s, op: %s}, clientId: %d, reqId: %d\n",
+		kv.me, kv.gid, args.Key, args.Value, args.Op, args.Id, args.ReqId)
 	reply.WrongLeader = false
 
-	op := Op{args.Key, args.Value, args.Op, args.Id, args.ReqId}
+	op := Op{args.Key, args.Value, args.Op, args.Id, args.ReqId, args.ConfigNum}
 
-	applyReply := kv.startAgree(op)
+	applyReply := kv.startAgree(args.ConfigNum, op)
 
 	reply.Err = Err(applyReply.err)
 
-	//raft.Log3("server.go: server %d PutAppend over, {key: %s, value: %s, op: %s}, leader: %t, clientId: %d, err: %s \n",
-	//	kv.me, args.Key, kv.store[op.Key], args.Op, isLeader, args.Id, reply.Err)
+	raft.Log3("server.go: server: %d, gid: %d, PutAppend over, "+
+		"{key: %s, value: %s, op: %s}, leader: %t, clientId: %d, err: %s \n",
+		kv.me, kv.gid, args.Key, kv.store[op.Key], args.Op, isLeader, args.Id, reply.Err)
 }
 
 //
@@ -238,23 +252,28 @@ func (kv *ShardKV) Migration(arg *MigrationArg, reply *MigrationReply) {
 	kv.mu.Lock()
 	defer kv.mu.Unlock()
 
-	if arg.ConfigNum >= kv.config.Num || len(kv.needToDispatchShards)  <=0 {
+	if arg.ConfigNum >= kv.config.Num || len(kv.needToDispatchShards) <= 0 {
 		reply.Err = ErrWrongGroup
 		return
 	}
 
-	raft.Log3("server.go: server: %d, gid: %d Migration, shard: %d\n", kv.me, kv.gid, arg.Shard)
+	raft.Log3("server.go: server: %d, gid: %d, Migration, shard: %d\n", kv.me, kv.gid, arg.Shard)
 
 	reply.Err = OK
 	reply.Shard = arg.Shard
+	reply.ConfigNum = arg.ConfigNum
 	reply.Data = MigrationData{}
 	reply.Data.Store = make(map[string]string)
+	reply.Data.Executed = make(map[int64]int64)
+
 	for k, v := range kv.needToDispatchShards[arg.ConfigNum][arg.Shard].Store {
-		if k == "0"  {
-			raft.Log3("server.go: server: %d, gid: %d, Migration key: %s, value: %s\n", kv.me, kv.gid, k, v)
-		}
 		reply.Data.Store[k] = v
 	}
+
+	for k, v := range kv.needToDispatchShards[arg.ConfigNum][arg.Shard].Executed{
+		reply.Data.Executed[k] = v
+	}
+
 }
 
 func (kv *ShardKV) doPoll() {
@@ -275,12 +294,12 @@ func (kv *ShardKV) doPoll() {
 
 func printShards(shards map[int]bool) string {
 	s := ""
-	for k := range shards{
+	for k := range shards {
 		s += strconv.Itoa(k) + ", "
 	}
 
 	if len(s) > 0 {
-		s = s[0 : len(s) - 2]
+		s = s[0 : len(s)-2]
 	}
 
 	return s
@@ -288,30 +307,27 @@ func printShards(shards map[int]bool) string {
 
 func printConfigShards(shards [10]int) string {
 	s := ""
-	for _, k := range shards{
+	for _, k := range shards {
 		s += strconv.Itoa(k) + ", "
 	}
 
 	if len(s) > 0 {
-		s = s[0 : len(s) - 2]
+		s = s[0 : len(s)-2]
 	}
 
 	return s
 }
 func (kv *ShardKV) applyNewConfig(newConfig *shardmaster.Config) {
 
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 
 	if newConfig.Num <= kv.config.Num {
 		return
 	}
 
 	raft.Log3("server.go: server: %d, gid: %d, applyNewConfig, config_shards: %s, num: %d\n",
-		kv.me, kv.gid, printConfigShards(newConfig.Shards) , newConfig.Num)
+		kv.me, kv.gid, printConfigShards(newConfig.Shards), newConfig.Num)
 
-
-	oldOwnShards :=  kv.ownShards
+	oldOwnShards := kv.ownShards
 
 	kv.ownShards = make(map[int]bool)
 
@@ -332,12 +348,18 @@ func (kv *ShardKV) applyNewConfig(newConfig *shardmaster.Config) {
 		for shard := range oldOwnShards {
 			data := MigrationData{}
 			data.Store = make(map[string]string)
-			for k, v := range kv.store{
+			data.Executed = make(map[int64]int64)
+			for k, v := range kv.store {
 				if key2shard(k) == shard {
 					data.Store[k] = v
 					delete(kv.store, k)
 				}
 			}
+
+			for k, v := range kv.executed {
+					data.Executed[k] = v
+			}
+
 			shard2Data[shard] = data
 		}
 		kv.needToDispatchShards[kv.config.Num] = shard2Data
@@ -346,7 +368,7 @@ func (kv *ShardKV) applyNewConfig(newConfig *shardmaster.Config) {
 	kv.config = newConfig.Copy()
 	kv.configLog[kv.config.Num] = kv.config.Copy()
 	if len(kv.needToPullShards) > 0 {
-		raft.Log3("server.go: server: %d, gid: %d, " +
+		raft.Log3("server.go: server: %d, gid: %d, "+
 			"applyNewConfig over, num: %d, owned shards: %s, but need to pull \n",
 			kv.me, kv.gid, newConfig.Num, printShards(kv.ownShards))
 	} else {
@@ -358,20 +380,16 @@ func (kv *ShardKV) applyNewConfig(newConfig *shardmaster.Config) {
 
 func (kv *ShardKV) doPull() {
 	kv.mu.Lock()
-	defer kv.mu.Unlock()
 
 	_, isLeader := kv.rf.GetState()
 
-	if !isLeader {
+	if !isLeader ||  len(kv.needToPullShards) <= 0{
+		kv.mu.Unlock()
 		return
 	}
 
-	if len(kv.needToPullShards) <= 0 {
-		return
-	}
-
-	raft.Log3("server.go: server: %d, gid: %d, numOfShards: %d doPull\n", kv.me, kv.gid, len(kv.needToPullShards))
-	defer raft.Log3("server.go: server: %d, gid: %d, numOfShards: %d, doPull over\n", kv.me, kv.gid, len(kv.needToPullShards))
+	raft.Log3("server.go: server: %d, gid: %d, numOfShardsNeedToPull: %d doPull\n", kv.me, kv.gid, len(kv.needToPullShards))
+	defer raft.Log3("server.go: server: %d, gid: %d, numOfShardsToPull: %d, doPull over\n", kv.me, kv.gid, len(kv.needToPullShards))
 
 	ch := make(chan int)
 	count := len(kv.needToPullShards)
@@ -384,32 +402,33 @@ func (kv *ShardKV) doPull() {
 		gid := kv.configLog[configNum].Shards[shard]
 
 		go func(cfg shardmaster.Config) {
+			defer func() { ch <- 0 }()
 			if servers, ok := cfg.Groups[gid]; ok {
 				for si := 0; si < len(servers); si++ {
 					srv := kv.make_end(servers[si])
 
 					var reply MigrationReply
+					raft.Log3("server.go: server: %d, gid: %d, doPull, call server %s migration \n", kv.me, kv.gid, servers[si])
 					//raft.Log3("server.go: server: %d, gid: %d doPull, call server %s migration\n", kv.me, kv.gid, servers[si])
 					ok := srv.Call("ShardKV.Migration", &migrationArg, &reply)
 
 					if ok && reply.Err == OK {
-						raft.Log3("server.go: server: %d, gid: %d doPull OK, call server %s migration back\n", kv.me, kv.gid, servers[si])
-						kv.rf.Start(reply)
-						ch <- 0
+						raft.Log3("server.go: server: %d, gid: %d, doPull OK, call server %s migration back, " +
+							"startAgreeReply\n", kv.me, kv.gid, servers[si])
+						kv.startAgree(kv.config.Num, reply)
 						break
 					}
 				}
 			}
-			ch <- 0
 		}(kv.configLog[configNum].Copy())
 	}
 
-	for count > 0  {
-		<- ch
+	kv.mu.Unlock()
+	for count > 0 {
+		<-ch
 		count--
 	}
 }
-
 
 //
 // servers[] contains the ports of the servers in this group.
@@ -469,13 +488,13 @@ func StartServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persister,
 	kv.store = make(map[string]string)
 	kv.executed = make(map[int64]int64)
 
-	kv.ownShards =  make(map[int]bool)
+	kv.ownShards = make(map[int]bool)
 	kv.needToPullShards = make(map[int]int)
 	kv.needToDispatchShards = make(map[int]map[int]MigrationData)
 	kv.configLog = make(map[int]shardmaster.Config)
 	kv.configLog[kv.config.Num] = kv.config.Copy()
 
-	raft.Log3("start shardKV server %d, gid: %d \n", kv.me, gid)
+	raft.Log3("start shardKV server: %d, gid: %d \n", kv.me, gid)
 	go waitToAgree(kv)
 	go poll(kv)
 	go pull(kv)
@@ -501,76 +520,105 @@ func poll(kv *ShardKV) {
 	}
 }
 
-
 func waitToAgree(kv *ShardKV) {
 
 	for {
-		applyMsg := <- kv.applyCh
+		applyMsg := <-kv.applyCh
 
+		kv.mu.Lock()
 		if applyMsg.UseSnapshot {
+			raft.Log3("server.go, server: %d, gid: %d, snapshot\n", kv.me, kv.gid)
 			r := bytes.NewBuffer(applyMsg.Snapshot)
 			d := gob.NewDecoder(r)
 
-			kv.mu.Lock()
 			kv.store = make(map[string]string)
 			kv.executed = make(map[int64]int64)
+
+			kv.ownShards = make(map[int]bool)
+			kv.needToPullShards = make(map[int]int)
+			kv.needToDispatchShards = make(map[int]map[int]MigrationData)
+			kv.configLog = make(map[int]shardmaster.Config)
+
 			d.Decode(&kv.executed)
 			d.Decode(&kv.store)
-			kv.mu.Unlock()
+
+			d.Decode(&kv.ownShards)
+			d.Decode(&kv.needToPullShards)
+			d.Decode(&kv.needToDispatchShards)
+			d.Decode(&kv.configLog)
+			d.Decode(&kv.config)
 
 		} else {
 
 			op, ok := applyMsg.Command.(Op)
 
+			_, isLeader := kv.rf.GetState()
 			if ok {
-				_, isLeader := kv.rf.GetState()
 
-				raft.Log("server.go: server %d waitToAgree , op: {key: %s, value: %s, op: %s}, "+
-					"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
+				raft.Log3("server.go: server: %d, gid: %d, waitToAgree , op: {key: %s, value: %s, op: %s}, "+
+					"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, kv.gid, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
 
 				reply := kv.apply(op)
 
 				if isLeader {
-					kv.mu.Lock()
+					raft.Log3("server.go: server: %d, gid: %d, waitToAgree, notify index: %d\n",
+						kv.me, kv.gid, applyMsg.Index)
 					op, ok := kv.opChans[applyMsg.Index]
-					kv.mu.Unlock()
 					if ok {
 						op <- reply
 					}
 				}
 
-				kv.mu.Lock()
 				if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate {
 					raft.Log2("server.go: server %d, max_raft_state: %d, cur_raft_state: %d \n", kv.me, kv.maxraftstate, kv.rf.GetRaftStateSize())
 					w := new(bytes.Buffer)
 					e := gob.NewEncoder(w)
 					e.Encode(kv.executed)
 					e.Encode(kv.store)
+
+					e.Encode(kv.ownShards)
+					e.Encode(kv.needToPullShards)
+					e.Encode(kv.needToDispatchShards)
+					e.Encode(kv.configLog)
+					e.Encode(kv.config)
 					data := w.Bytes()
 					go kv.rf.SnapShot(data, applyMsg.Index)
 				}
-				kv.mu.Unlock()
-				raft.Log("server.go: server %d waitToAgree over, op: {key: %s, value: %s, op: %s}, "+
-					"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
-			} else if reply, ok := applyMsg.Command.(MigrationReply); ok{
-				kv.mu.Lock()
-				delete(kv.needToPullShards, reply.Shard)
-				kv.ownShards[reply.Shard] = true
+				raft.Log3("server.go: server: %d, gid: %d, waitToAgree over, op: {key: %s, value: %s, op: %s}, "+
+					"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, kv.gid, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
+			} else if reply, ok := applyMsg.Command.(MigrationReply); ok {
+				if reply.ConfigNum == kv.config.Num - 1 {
 
-				for k, v := range reply.Data.Store {
-					if k == "0" {
-						raft.Log3("server.go: server: %d, gid: %d, apply MigrationReply key: %s, value: %s\n", kv.me, kv.gid, k, v)
+					delete(kv.needToPullShards, reply.Shard)
+					kv.ownShards[reply.Shard] = true
+
+					for k, v := range reply.Data.Store {
+						kv.store[k] = v
 					}
-					kv.store[k] = v
+
+					for k, v := range reply.Data.Executed {
+						kv.executed[k] = v
+					}
+					raft.Log3("server.go: server: %d, gid: %d, migrationReply, ownShards:%s\n",
+						kv.me, kv.gid, printShards(kv.ownShards))
 				}
-				raft.Log3("server.go: server: %d, gid: %d migrationReply, ownShards:%s\n",
-					kv.me, kv.gid, printShards(kv.ownShards))
-				kv.mu.Unlock()
+
+				if isLeader {
+					raft.Log3("server.go: server: %d, gid: %d, wait migrationReply, notify index: %d\n",
+						kv.me, kv.gid, applyMsg.Index)
+					op, ok := kv.opChans[applyMsg.Index]
+					reply := ApplyReply{}
+					reply.err = OK
+					if ok {
+						op <- reply
+					}
+				}
 			} else {
 				newConfig := applyMsg.Command.(shardmaster.Config)
 				kv.applyNewConfig(&newConfig)
 			}
 		}
+		kv.mu.Unlock()
 	}
 
 }

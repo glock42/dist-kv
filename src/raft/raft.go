@@ -845,9 +845,9 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
 
                 for rf.lastApplied < rf.commitIndex && rf.getLogsIdx(rf.lastApplied + 1) < len(rf.logs) {
                     //println(lastAppliedIndex)
-                    Log2("raft.go: server %d applyCommand, len(log): %d, rf.lastApplied: %d, " +
-                        "rf.commitIndex: %d, rf.base: %d\n",
-                        rf.me, len(rf.logs), rf.lastApplied, rf.commitIndex, rf.base)
+                    //Log3("raft.go: server %d applyCommand, len(log): %d, rf.lastApplied: %d, " +
+                    //    "rf.commitIndex: %d, rf.base: %d\n",
+                    //    rf.me, len(rf.logs), rf.lastApplied, rf.commitIndex, rf.base)
                     rf.applyCommand(rf.logs[rf.getLogsIdx(rf.lastApplied) + 1])
                 }
                 rf.unLock()

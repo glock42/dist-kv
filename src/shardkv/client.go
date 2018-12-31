@@ -10,6 +10,7 @@ package shardkv
 
 import (
 	"labrpc"
+	"raft"
 	"sync"
 )
 import "crypto/rand"
@@ -65,6 +66,7 @@ func MakeClerk(masters []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 	ck.id = nrand()
 	ck.reqId = 1
 	ck.config = ck.sm.Query(-1)
+	raft.Log3("client.go: MakeClerk, clientId: %d\n", ck.id)
 	return ck
 }
 

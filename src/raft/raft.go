@@ -101,6 +101,8 @@ type Entry struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
+    rf.mu.Lock()
+    defer rf.mu.Unlock()
     return rf.currentTerm,  rf.status == LEADER
 }
 
@@ -781,7 +783,10 @@ func Make(peers []*labrpc.ClientEnd, me int, persister *Persister, applyCh chan 
     rf.lastApplied = rf.logs[0].Index
     go func() {
         for {
-            switch rf.status {
+        	rf.mu.Lock()
+        	status := rf.status
+        	rf.mu.Unlock()
+            switch status {
             case FOLLOWER:
                 Log("server " +  strconv.Itoa(rf.me) + " start follower")
                 select {

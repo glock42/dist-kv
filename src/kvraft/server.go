@@ -68,6 +68,9 @@ func (kv *RaftKV) startAgree(op Op) ApplyReply {
 			}
 		case <-time.After(1000 * time.Millisecond):
 			reply.err = ERROR
+			kv.mu.Lock()
+			delete(kv.opChans, index)
+			kv.mu.Unlock()
 	}
 	raft.Log("server.go: server %d startAgree over, op: {key: %s, value: %s, op: %s}," +
 		" clientId %d, reqId: %d, result: %s \n", kv.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId, reply.err)
@@ -77,8 +80,6 @@ func (kv *RaftKV) startAgree(op Op) ApplyReply {
 func (kv *RaftKV) apply(op Op) ApplyReply {
 	raft.Log("server.go: server %d apply, op: {key: %s, value: %s, op: %s}," +
 		" clientId %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, op.ClientId, op.ReqId)
-	kv.mu.Lock()
-	defer kv.mu.Unlock()
 	reply := ApplyReply{}
 	reply.err = OK
 	reply.value = ""
@@ -173,6 +174,14 @@ func (kv *RaftKV) Kill() {
 	raft.Log("server.go: server %d killed\n", kv.me)
 }
 
+func (kv *RaftKV) notify(reply ApplyReply, index int) {
+	op, ok := kv.opChans[index]
+	if ok {
+		op <- reply
+		delete(kv.opChans, index)
+	}
+}
+
 //
 // servers[] contains the ports of the set of
 // servers that will cooperate via Raft to
@@ -215,38 +224,27 @@ func waitToAgree(kv *RaftKV) {
 	for {
 		applyMsg := <- kv.applyCh
 
+		kv.mu.Lock()
 		if applyMsg.UseSnapshot {
 			r := bytes.NewBuffer(applyMsg.Snapshot)
 			d := gob.NewDecoder(r)
 
-			kv.mu.Lock()
 			kv.store = make(map[string]string)
 			kv.executed = make(map[int64]int64)
 			d.Decode(&kv.executed)
 			d.Decode(&kv.store)
-			kv.mu.Unlock()
 
 		} else {
 
 			op := applyMsg.Command.(Op)
 
-			_, isLeader := kv.rf.GetState()
 
-			raft.Log("server.go: server %d waitToAgree , op: {key: %s, value: %s, op: %s}, "+
-				"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
+			//raft.Log("server.go: server %d waitToAgree , op: {key: %s, value: %s, op: %s}, "+
+			//	"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
 
 			reply := kv.apply(op)
+			kv.notify(reply, applyMsg.Index)
 
-			if isLeader {
-				kv.mu.Lock()
-				op, ok := kv.opChans[applyMsg.Index]
-				kv.mu.Unlock()
-				if ok {
-					op <- reply
-				}
-			}
-
-			kv.mu.Lock()
 			if kv.maxraftstate != -1 && kv.rf.GetRaftStateSize() >= kv.maxraftstate  {
 				raft.Log2("server.go: server %d, max_raft_state: %d, cur_raft_state: %d \n", kv.me, kv.maxraftstate, kv.rf.GetRaftStateSize())
 				w := new(bytes.Buffer)
@@ -256,10 +254,10 @@ func waitToAgree(kv *RaftKV) {
 				data := w.Bytes()
 				go kv.rf.SnapShot(data, applyMsg.Index)
 			}
-			kv.mu.Unlock()
-			raft.Log("server.go: server %d waitToAgree over, op: {key: %s, value: %s, op: %s}, "+
-				"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
+			//raft.Log("server.go: server %d waitToAgree over, op: {key: %s, value: %s, op: %s}, "+
+			//	"isLeader: %t, clientId: %d, reqId: %d\n", kv.me, op.Key, op.Value, op.Operation, isLeader, op.ClientId, op.ReqId)
 		}
+		kv.mu.Unlock()
 	}
 
 }
